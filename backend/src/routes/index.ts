@@ -11,8 +11,9 @@ import { optionalAuth } from '../middleware/auth.middleware';
 
 const router = Router();
 
-// Foundational health endpoint: GET /health
+// Foundational health endpoint: GET /health, POST /api/health/integrations
 router.use('/health', healthRoutes);
+router.use('/api/health', healthRoutes);
 
 // Phase 12 Authentication & Real User Identity endpoints
 router.use('/api/auth', authRoutes);

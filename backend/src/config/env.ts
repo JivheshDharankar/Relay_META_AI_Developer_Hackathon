@@ -64,6 +64,9 @@ const envSchema = z.object({
   // req.ip (rate-limit keys). Default false: direct clients' XFF headers are
   // untrusted and ignored, so limits cannot be evaded by header rotation.
   TRUST_PROXY: z.string().default('false').transform((val) => val === 'true'),
+
+  // Secure Diagnostics (Phase 15 / Operational Verification)
+  INTEGRATION_DIAGNOSTIC_TOKEN: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
