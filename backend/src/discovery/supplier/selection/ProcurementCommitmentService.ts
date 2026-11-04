@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { roundMoney } from '../../../domain/procurement/decimal';
+import { calculateLineSubtotal } from '../../../domain/procurement/quantityNormalizer';
 import { eventBus } from '../../../events';
 import { RFQService, rfqService } from '../rfq/RFQService';
 import { Quote } from '../quote/types';
@@ -173,7 +173,7 @@ export class ProcurementCommitmentService {
           const unitPrice = qLine?.unitPrice;
           const lineSubtotal =
             qLine?.lineSubtotal ??
-            (unitPrice !== undefined ? roundMoney(unitPrice * li.quantity).toNumber() : undefined);
+            (unitPrice !== undefined ? calculateLineSubtotal(li.quantity, li.unit, unitPrice, (qLine as any)?.pricingUnit) : undefined);
 
           return {
             lineNumber: idx + 1,

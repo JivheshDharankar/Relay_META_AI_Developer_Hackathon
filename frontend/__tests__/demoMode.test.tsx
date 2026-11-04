@@ -187,9 +187,51 @@ describe('Demo one-click trigger', () => {
   it('submits the preselected fully-specified request in one click', async () => {
     startMock.mockClear();
     render(<CommandCenterPage />);
-    const button = await screen.findByRole('button', { name: /run 30-second demo mission/i });
+    const button = await screen.findByRole('button', { name: /run demo mission/i });
     fireEvent.click(button);
     expect(startMock).toHaveBeenCalledTimes(1);
     expect(startMock).toHaveBeenCalledWith('2 kg rice, 1 kg sugar and 2 packs Maggi');
+  });
+});
+
+describe('Homepage Suggestion Chips UX', () => {
+  const suggestions = [
+    'Find the best bulk deal for 100 kg of rice',
+    'Compare suppliers for monthly cleaning supplies',
+    'I need 2 kg rice and 1 kg sugar',
+    'मुझे 3 किलो दूध चाहिए',
+  ];
+
+  it.each(suggestions)('clicking "%s" populates command input without auto-submitting', async (suggestion) => {
+    startMock.mockClear();
+    render(<CommandCenterPage />);
+    const chipButton = await screen.findByRole('button', { name: suggestion });
+    fireEvent.click(chipButton);
+
+    const textarea = screen.getByRole('textbox', { name: /what do you need/i }) as HTMLTextAreaElement;
+    expect(textarea.value).toBe(suggestion);
+    // Crucial requirement: clicking chip must NOT auto-launch mission
+    expect(startMock).not.toHaveBeenCalled();
+  });
+
+  it('allows editing populated text before submission', async () => {
+    startMock.mockClear();
+    render(<CommandCenterPage />);
+    const chipButton = await screen.findByRole('button', { name: 'मुझे 3 किलो दूध चाहिए' });
+    fireEvent.click(chipButton);
+
+    const textarea = screen.getByRole('textbox', { name: /what do you need/i }) as HTMLTextAreaElement;
+    expect(textarea.value).toBe('मुझे 3 किलो दूध चाहिए');
+
+    // User edits the populated text
+    fireEvent.change(textarea, { target: { value: 'मुझे 5 किलो दूध और 1 किलो मक्खन चाहिए' } });
+    expect(textarea.value).toBe('मुझे 5 किलो दूध और 1 किलो मक्खन चाहिए');
+
+    // Submits via form button
+    const submitButton = screen.getByTestId('ask-relay-button');
+    fireEvent.click(submitButton);
+
+    expect(startMock).toHaveBeenCalledTimes(1);
+    expect(startMock).toHaveBeenCalledWith('मुझे 5 किलो दूध और 1 किलो मक्खन चाहिए');
   });
 });

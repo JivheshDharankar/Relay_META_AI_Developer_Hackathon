@@ -22,6 +22,7 @@ import {
   Check,
   X,
   Lock,
+  ExternalLink,
 } from 'lucide-react';
 import { formatMoney, shortRef } from '@/lib/format';
 import type { CanonicalStage, StageEvidence } from '@/lib/workflow/stageEvidence';
@@ -363,6 +364,87 @@ function QuoteStageCard({ quotes }: StageCardProps) {
       ) : (
         <div className="rounded-2xl border border-relay-surface-border bg-[#12161D] p-3 text-xs text-relay-ink-600">
           Ranked normalized wholesale offers with price and operational metrics.
+        </div>
+      )}
+
+      {quotes?.lineItems && quotes.lineItems.length > 0 && (
+        <div className="space-y-2 pt-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-semibold tracking-wide uppercase text-relay-ink-500">
+              Itemized Live Price Discovery & Unit Normalization
+            </span>
+            <span className="text-[10px] text-relay-ink-400 font-mono">
+              Meta Muse Spark 1.3 Grounded Search
+            </span>
+          </div>
+
+          <div className="overflow-x-auto rounded-2xl border border-relay-surface-border bg-[#12161D]">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-relay-surface-sunken text-relay-ink-500 font-semibold border-b border-relay-surface-border">
+                <tr>
+                  <th className="px-3 py-2">Item</th>
+                  <th className="px-3 py-2 text-center">Requested Qty</th>
+                  <th className="px-3 py-2 text-right">Discovered Rate</th>
+                  <th className="px-3 py-2 text-right">Line Subtotal</th>
+                  <th className="px-3 py-2 text-center">Source & Provenance</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-relay-surface-border font-medium">
+                {quotes.lineItems.map((li, idx) => (
+                  <tr key={`${li.productName}-${idx}`}>
+                    <td className="px-3 py-2 text-relay-ink-900 font-medium capitalize">
+                      {li.productName}
+                      {li.packageSizeNote && (
+                        <span className="block text-[10px] text-relay-ink-500 font-normal">
+                          {li.packageSizeNote}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-center font-mono tnum text-relay-ink-700">
+                      {li.quantity} {li.unit}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono tnum text-relay-ink-900">
+                      {li.unitPrice ? `₹${li.unitPrice.toFixed(2)}/${li.pricingUnit || 'kg'}` : '—'}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono tnum font-semibold text-relay-ink-900">
+                      {li.lineSubtotal ? formatMoney(li.lineSubtotal) : '—'}
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                        {li.sourceUrl ? (
+                          <a
+                            href={li.sourceUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-[11px] font-medium text-relay-primary-400 hover:text-relay-primary-300 underline"
+                          >
+                            <span>{li.merchant || 'Live Listing'}</span>
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+                        ) : (
+                          <span className="text-[11px] text-relay-ink-600">
+                            {li.merchant || 'Market Estimate'}
+                          </span>
+                        )}
+                        <span
+                          className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold uppercase ${
+                            li.provenanceStatus === 'VERIFIED_LIVE_LISTING'
+                              ? 'bg-relay-success-500/10 text-relay-success-400 border border-relay-success-500/20'
+                              : 'bg-relay-primary-500/10 text-relay-primary-400 border border-relay-primary-500/20'
+                          }`}
+                        >
+                          {li.provenanceStatus === 'VERIFIED_LIVE_LISTING' ? 'LIVE' : 'ESTIMATE'}
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[10px] text-relay-ink-500 italic px-1 pt-1">
+            * Commercial quotes include estimated delivery and GST. Note: Under Indian GST laws, basic unbranded staples (fresh produce, loose grains, milk) attract 0% GST, while packaged grocery goods attract 5%–12%.
+          </p>
         </div>
       )}
     </div>

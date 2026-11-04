@@ -32,6 +32,21 @@ export function normalizeDevanagariNumerals(text: string): string {
  * Uses token-aware unicode lookarounds to prevent mutating compound or unrelated words (e.g., "one-time", "dosa", "chocolate").
  */
 const INDIC_NUMBER_WORDS: [RegExp, string][] = [
+  // Fractional & Colloquial Quantities (Compound first)
+  [/(?<![\p{L}\p{M}\p{N}-])(?:साडेतीन|साढ़े तीन|sadhe\s+teen)(?![\p{L}\p{M}\p{N}-])/gui, ' 3.5 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:साडेचार|साढ़े चार|sadhe\s+chaar|sadhe\s+char)(?![\p{L}\p{M}\p{N}-])/gui, ' 4.5 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:साडेपाच|साढ़े पांच|sadhe\s+paanch|sadhe\s+panch)(?![\p{L}\p{M}\p{N}-])/gui, ' 5.5 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:सवा|sawa|savva)(?![\p{L}\p{M}\p{N}-])/gui, ' 1.25 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:दीड|डेढ़|dedh|dhedh)(?![\p{L}\p{M}\p{N}-])/gui, ' 1.5 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:अडीच|ढाई|dhai|adhai)(?![\p{L}\p{M}\p{N}-])/gui, ' 2.5 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:पावणे|पौने|paune|pone)(?=\s*(?:kilo|kg|किलो|l\b|litre|liter|लीटर))/gui, ' 0.75 '],
+  // Half (आधा, अर्धा, adha, aadha, ardha, half before a unit)
+  [/(?<![\p{L}\p{M}\p{N}-])(?:आधा|अर्धा|adha|aadha|ardha)(?![\p{L}\p{M}\p{N}-])/gui, ' 0.5 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:half\s+(?:a\s+)?)(?=(?:kilo|kg|g\b|gm|gram|litre|liter|l\b|pack|bottle|dozen))/gui, ' 0.5 '],
+  // Quarter / Paav (protect against "pav bhaji" or "vada pav")
+  [/(?<![\p{L}\p{M}\p{N}-])(?:paav|pao|पाव)(?=\s*(?:kilo|kg|किलो|g\b|gm|gram|l\b|litre|liter|लीटर))/gui, ' 0.25 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:ek\s+)?(?:paav|pao|पाव)(?!\s*(?:bhaji|vada|wada|bread|bun|roti))/gui, ' 0.25 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:quarter)(?=\s*(?:kilo|kg|g\b|gm|gram|litre|liter|l\b|pack|bottle))/gui, ' 0.25 '],
   // Hundreds and thousands first
   [/(?<![\p{L}\p{M}\p{N}-])(?:दोनशे|दो सौ|two hundred)(?![\p{L}\p{M}\p{N}-])/gui, ' 200 '],
   [/(?<![\p{L}\p{M}\p{N}-])(?:शंभर|एक सौ|one hundred)(?![\p{L}\p{M}\p{N}-])/gui, ' 100 '],

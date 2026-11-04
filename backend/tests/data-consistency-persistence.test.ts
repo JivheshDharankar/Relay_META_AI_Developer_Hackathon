@@ -189,7 +189,7 @@ describe('Phase 1: Workflow Persistence to PostgreSQL & Mandate Enforcement', ()
     expect(ledgerEntry!.entryType).toBe('PROCUREMENT_ALLOCATION');
 
     // 10. ReconciliationRecord exists with status RECONCILED
-    const reconRecord = await prisma.reconciliationRecord.findUnique({
+    const reconRecord = await prisma.reconciliationRecord.findFirst({
       where: { commitmentId: wf.entities.commitmentId! },
     });
     expect(reconRecord).not.toBeNull();

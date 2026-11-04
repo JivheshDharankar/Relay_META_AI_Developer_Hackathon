@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import { roundMoney } from '../domain/procurement/decimal';
+import { calculateLineSubtotal } from '../domain/procurement/quantityNormalizer';
 import { ProcurementCommitment, PurchaseOrder } from '../discovery/supplier/selection/types';
 import { FulfillmentOrder } from '../fulfillment/types';
 import { Payment } from '../payment/types';
@@ -245,7 +246,10 @@ export class AllocationService {
 
         if (matchedItem) {
           const unitPrice = matchedItem.unitPrice ?? 0;
-          const subtotal = roundMoney(unitPrice * demand.requestedQuantity).toNumber();
+          const subtotal =
+            demand.requestedQuantity === matchedItem.requestedQuantity && matchedItem.lineSubtotal !== undefined
+              ? matchedItem.lineSubtotal
+              : calculateLineSubtotal(demand.requestedQuantity, demand.unit, unitPrice, (matchedItem as any).pricingUnit);
           lineCosts.push({
             demandLineId: demand.demandLineId,
             residentOrderId: demand.residentOrderId,
@@ -271,7 +275,10 @@ export class AllocationService {
 
         if (matchedLine) {
           const unitPrice = matchedLine.unitPrice;
-          const subtotal = roundMoney(unitPrice * demand.requestedQuantity).toNumber();
+          const subtotal =
+            demand.requestedQuantity === matchedLine.quantity && matchedLine.lineTotal !== undefined
+              ? matchedLine.lineTotal
+              : calculateLineSubtotal(demand.requestedQuantity, demand.unit, unitPrice);
           lineCosts.push({
             demandLineId: demand.demandLineId,
             residentOrderId: demand.residentOrderId,

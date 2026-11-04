@@ -219,7 +219,7 @@ export default function CommandCenterPage() {
                     className="inline-flex items-center gap-2 rounded-md border border-relay-surface-border bg-[#12161D] hover:border-relay-navy-200 hover:bg-relay-navy-50 disabled:opacity-50 px-3.5 py-2 text-[13px] font-semibold text-relay-ink-900 transition-colors min-h-[38px]"
                   >
                     <Play className="h-3.5 w-3.5 text-relay-ink-500" aria-hidden />
-                    Run 30-second demo mission
+                    Run demo mission
                   </button>
                   <span className="text-[12px] text-relay-ink-500 font-mono">
                     “{DEMO_REQUEST}”
@@ -227,8 +227,8 @@ export default function CommandCenterPage() {
                 </div>
 
                 {/* Example requests: real prompts, one click to try */}
-                <div className="mt-5 flex flex-wrap items-center gap-1.5">
-                  <span className="text-xs text-relay-ink-500 mr-1">Try</span>
+                <div className="relative z-10 mt-5 flex flex-wrap items-center gap-1.5">
+                  <span className="text-xs text-relay-ink-500 mr-1 select-none">Try</span>
                   {[
                     'Find the best bulk deal for 100 kg of rice',
                     'Compare suppliers for monthly cleaning supplies',
@@ -242,7 +242,7 @@ export default function CommandCenterPage() {
                         setRetryPrompt(example);
                         setFillNonce((n) => n + 1);
                       }}
-                      className="rounded-md border border-relay-surface-border bg-[#12161D] hover:border-relay-navy-200 hover:bg-relay-navy-50 px-2.5 py-1.5 text-[12.5px] text-relay-ink-700 transition-colors"
+                      className="cursor-pointer select-none active:scale-[0.98] rounded-md border border-relay-surface-border bg-[#12161D] hover:border-relay-navy-200 hover:bg-relay-navy-50 px-2.5 py-1.5 text-[12.5px] text-relay-ink-700 transition-colors min-h-[32px] inline-flex items-center"
                     >
                       {example}
                     </button>

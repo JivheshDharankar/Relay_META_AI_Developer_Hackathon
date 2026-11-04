@@ -8,6 +8,7 @@ import {
   toDecimalOptional,
   toNonNegativeDecimal,
 } from '../../../domain/procurement/decimal';
+import { calculateLineSubtotal } from '../../../domain/procurement/quantityNormalizer';
 import { Quote } from '../quote/types';
 import { ProposedAllocation, SupplierAllocation } from './types';
 
@@ -81,7 +82,14 @@ export class AllocationService {
           );
         }
         unitPrice = primaryLine.unitPrice;
-        lineSubtotalDecimal = roundMoney(multiplyDecimals(proposed.quantity, unitPrice));
+        lineSubtotalDecimal = toDecimal(
+          calculateLineSubtotal(
+            proposed.quantity,
+            unit,
+            unitPrice,
+            primaryLine.pricingUnit
+          )
+        );
       } else {
         const totalQuotedQty = lines.reduce((acc, l) => acc + (l.quotedQuantity ?? 0), 0);
         if (totalQuotedQty <= 0) {
@@ -104,13 +112,15 @@ export class AllocationService {
               `Quote '${proposed.quoteId}' line item has negative unitPrice: ${line.unitPrice}`
             );
           }
-          const lineQty = toDecimal(line.quotedQuantity ?? 0);
-          if (lineQty.isNegative()) {
+          const lineQty = line.quotedQuantity ?? 0;
+          if (lineQty < 0) {
             throw new Error(
               `Quote '${proposed.quoteId}' line item has negative quotedQuantity: ${line.quotedQuantity}`
             );
           }
-          const lineExtended = roundMoney(multiplyDecimals(lineQty, line.unitPrice));
+          const lineExtended = line.lineSubtotal !== undefined && line.lineSubtotal > 0
+            ? toDecimal(line.lineSubtotal)
+            : toDecimal(calculateLineSubtotal(lineQty, line.unit, line.unitPrice, line.pricingUnit));
           extendedSum = addDecimals(extendedSum, multiplyDecimals(lineExtended, factor));
         }
         lineSubtotalDecimal = roundMoney(extendedSum);

@@ -86,7 +86,7 @@ export const INTENT_CATALOG: CatalogEntry[] = [
   {
     productId: SEED_IDS.products.sugar,
     canonicalName: 'sugar',
-    keywords: ['sugar', 'cheeni', 'sakhar', 'चीनी', 'साखर'],
+    keywords: ['sugar', 'cheeni', 'chini', 'sakhar', 'चीनी', 'साखर'],
     unit: ProductUnit.KG,
     // "Sugar free" products are not the sugar SKU.
     matchExclusions: ['free'],

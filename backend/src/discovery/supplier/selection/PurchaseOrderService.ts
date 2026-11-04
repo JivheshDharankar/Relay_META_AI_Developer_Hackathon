@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import { eventBus } from '../../../events';
+import { calculateLineSubtotal } from '../../../domain/procurement/quantityNormalizer';
 import { Quote } from '../quote/types';
 import { RFQ } from '../rfq/types';
 import {
@@ -54,7 +55,9 @@ export class PurchaseOrderService {
               rfqLine.productName.toLowerCase().includes(ql.productName.toLowerCase())
           );
           const unitPrice = qLine?.unitPrice ?? alloc.agreedUnitPrice;
-          const lineTotal = Math.round(rfqLine.quantity * unitPrice * 100) / 100;
+          const lineTotal =
+            qLine?.lineSubtotal ??
+            calculateLineSubtotal(rfqLine.quantity, rfqLine.unit, unitPrice, qLine?.pricingUnit);
           return {
             lineNumber: index + 1,
             productName: rfqLine.productName,

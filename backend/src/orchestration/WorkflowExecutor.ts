@@ -5,6 +5,8 @@ import { SEED_IDS } from '../config/seedConstants';
 import { getCatalogReferencePrice } from '../config/pricingCatalog';
 import { matchCatalogProduct } from '../agent/intent/catalogMatcher';
 import { roundMoney } from '../domain/procurement/decimal';
+import { calculateLineSubtotal } from '../domain/procurement/quantityNormalizer';
+import { realtimePriceDiscoveryService } from '../agent/pricing/RealtimePriceDiscoveryService';
 import { failureClassificationService } from '../resilience/FailureClassificationService';
 import { transitionWorkflowStage, transitionWorkflowStatus } from './stateMachine';
 import {
@@ -487,11 +489,22 @@ export class WorkflowExecutor {
     assertLegalWorkflowStatusTransition(workflow.status, 'WAITING_FOR_QUOTES');
     transitionWorkflowStatus(workflow, 'WAITING_FOR_QUOTES');
 
+    // Discover live internet / benchmark prices for all items in the resident's locality
+    const workflowLineItems = getWorkflowLineItems(workflow);
+    const priceDiscovery = await realtimePriceDiscoveryService.discoverPrices({
+      items: workflowLineItems.map((li) => ({
+        productName: li.productName,
+        quantity: li.quantity,
+        unit: li.unit,
+        productId: li.productId,
+        identitySource: li.identitySource,
+      })),
+      location: workflow.location,
+    });
+    (workflow as any)._priceDiscovery = priceDiscovery;
+
     // Ingest dynamic quote response derived deterministically from request criteria
     const rawQuotes: Quote[] = [];
-    // One RFQ line per validated item; single-item workflows produce the
-    // exact legacy one-line request.
-    const workflowLineItems = getWorkflowLineItems(workflow);
     for (let i = 0; i < qualified.length; i++) {
       const cand = qualified[i];
 
@@ -518,23 +531,41 @@ export class WorkflowExecutor {
       }
 
       // Simulated commercial response: deterministic per (run, supplier,
-      // product) so fresh runs vary while staying plausible. Explicitly
-      // marked simulated — no live supplier participated.
+      // product) centered around discovered market prices.
       const simSeed = `${workflow.id}|${cand.id}`;
       const simLines = workflowLineItems.map((li) => {
-        const linePrice = this.computeDynamicPrice(li.productName, i, simSeed, li.productId);
+        const disc = priceDiscovery.items.find(
+          (d) => d.productName.toLowerCase() === li.productName.toLowerCase()
+        );
+        const linePrice = this.computeDynamicPrice(
+          li.productName,
+          i,
+          simSeed,
+          li.productId,
+          disc?.discoveredUnitPrice
+        );
+        const pricingUnit = disc?.pricingUnit || disc?.commercialUnit || 'kg';
+        const lineSubtotal = calculateLineSubtotal(li.quantity, li.unit, linePrice, pricingUnit);
+
         return {
           ...(li.identitySource ? { identitySource: li.identitySource } : {}),
           productName: li.productName,
           quotedQuantity: li.quantity,
           unit: li.unit,
           unitPrice: linePrice,
-          lineSubtotal: roundMoney(linePrice * li.quantity).toNumber(),
+          lineSubtotal,
+          pricingUnit,
+          provenanceStatus: disc?.provenanceStatus || 'INDICATIVE_MARKET_ESTIMATE',
+          merchant: disc?.merchant || cand.name,
+          sourceUrl: disc?.sourceUrl,
+          packageSizeNote: disc?.packageSizeNote,
         };
       });
       const subtotal = roundMoney(
         simLines.reduce((acc, l) => acc + l.lineSubtotal, 0)
       ).toNumber();
+      // Estimated GST: calculated as a blended commercial estimate (5%).
+      // Note: Statutory GST in India is 0% on fresh, unbranded agricultural staples and 5%-12% on packaged goods.
       const tax = roundMoney(subtotal * 0.05).toNumber();
       const deliveryFee = this.computeDynamicFee(i, simSeed);
       const total = roundMoney(subtotal + tax + deliveryFee).toNumber();
@@ -551,6 +582,11 @@ export class WorkflowExecutor {
           quotedQuantity: l.quotedQuantity,
           unit: l.unit,
           unitPrice: l.unitPrice,
+          pricingUnit: l.pricingUnit,
+          provenanceStatus: l.provenanceStatus,
+          merchant: l.merchant,
+          sourceUrl: l.sourceUrl,
+          packageSizeNote: l.packageSizeNote,
         })),
         deliveryFee,
         tax,
@@ -612,9 +648,12 @@ export class WorkflowExecutor {
     for (const line of targetQuote.lineItems) {
       const negotiatedUnitPrice = roundMoney(line.unitPrice * resultFactor).toNumber();
       line.unitPrice = negotiatedUnitPrice;
-      line.lineSubtotal = roundMoney(
-        negotiatedUnitPrice * line.quotedQuantity
-      ).toNumber();
+      line.lineSubtotal = calculateLineSubtotal(
+        line.quotedQuantity,
+        line.unit,
+        negotiatedUnitPrice,
+        line.pricingUnit
+      );
     }
     targetQuote.subtotal = roundMoney(
       targetQuote.lineItems.reduce((acc, l) => acc + l.lineSubtotal, 0)
@@ -1312,7 +1351,9 @@ export class WorkflowExecutor {
           (item.quantity > 0
             ? (commitment.financials.subtotal / allocationLines.length) / item.quantity
             : 100);
-        const lineTotal = quoteLine?.lineSubtotal ?? unitPrice * item.quantity;
+        const lineTotal =
+          quoteLine?.lineSubtotal ??
+          calculateLineSubtotal(item.quantity, item.unit, unitPrice, quoteLine?.pricingUnit);
 
         // Resident OrderItem
         await tx.orderItem.create({
@@ -1540,23 +1581,30 @@ export class WorkflowExecutor {
     productName: string,
     supplierOffset: number,
     runSeed = '',
-    productId?: string
+    productId?: string,
+    discoveredBasePrice?: number
   ): number {
     const ref = getCatalogReferencePrice(productName, productId);
+    const base = typeof discoveredBasePrice === 'number' && discoveredBasePrice > 0
+      ? discoveredBasePrice
+      : ref.basePrice;
+
     const input =
       runSeed === ''
         ? `${productName}|${supplierOffset}`
         : `${runSeed}|${productName}|${supplierOffset}`;
     const hash = this.hashSeeded(input);
 
-    const span = ref.maxPrice - ref.minPrice;
-    if (span <= 0) return ref.basePrice;
+    const span = ref.maxPrice - ref.minPrice > 0 ? (ref.maxPrice - ref.minPrice) : base * 0.15;
+    if (span <= 0) return roundMoney(base).toNumber();
 
     // Small supplier-specific variance (±3% to ±8%)
     const offsetEffect = ((supplierOffset % 3) - 1) * (span * 0.15);
-    const variance = hash % (span + 1);
-    const rawPrice = ref.minPrice + variance + offsetEffect;
-    const clampedPrice = Math.min(ref.maxPrice, Math.max(ref.minPrice, rawPrice));
+    const variance = (hash % (Math.floor(span) + 1)) - (span * 0.5);
+    const rawPrice = base + offsetEffect + (variance * 0.4);
+    const minBound = ref.minPrice > 0 ? Math.min(ref.minPrice, base * 0.85) : base * 0.85;
+    const maxBound = ref.maxPrice > 0 ? Math.max(ref.maxPrice, base * 1.15) : base * 1.15;
+    const clampedPrice = Math.min(maxBound, Math.max(minBound, rawPrice));
 
     return roundMoney(clampedPrice).toNumber();
   }

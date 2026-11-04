@@ -220,6 +220,9 @@ export interface QuoteEvidence {
   hasNegotiatedWinner: boolean;
   /** Authoritative winning total from the commitment (negotiated terms). */
   winningTotal: number | null;
+  /** Line-level items with unit pricing and provenance evidence */
+  lineItems?: EvidenceLineItem[];
+  pricingEvidence?: Record<string, unknown> | null;
 }
 
 /** One backend-evidenced procurement line item (never prompt-derived). */
@@ -229,6 +232,13 @@ export interface EvidenceLineItem {
   unit: string | null;
   /** How backend established the product identity, when the artifact says. */
   identitySource?: 'catalog' | 'open-world';
+  unitPrice?: number | null;
+  lineSubtotal?: number | null;
+  pricingUnit?: string | null;
+  merchant?: string | null;
+  sourceUrl?: string | null;
+  provenanceStatus?: string | null;
+  packageSizeNote?: string | null;
 }
 
 /**
@@ -246,11 +256,26 @@ export function quoteLineItems(run: ProcurementRun): EvidenceLineItem[] {
       const productName = str(line?.productName);
       if (!productName) continue;
       const source = str(line?.identitySource);
+      const unitPrice = num(line?.unitPrice);
+      const lineSubtotal = num(line?.lineSubtotal);
+      const pricingUnit = str(line?.pricingUnit);
+      const merchant = str(line?.merchant);
+      const sourceUrl = str(line?.sourceUrl);
+      const provenanceStatus = str(line?.provenanceStatus);
+      const packageSizeNote = str(line?.packageSizeNote);
+
       items.push({
         productName,
         quantity: num(line?.quotedQuantity ?? line?.quantity),
         unit: str(line?.unit),
         ...(source === 'catalog' || source === 'open-world' ? { identitySource: source } : {}),
+        ...(unitPrice !== null ? { unitPrice } : {}),
+        ...(lineSubtotal !== null ? { lineSubtotal } : {}),
+        ...(pricingUnit !== null ? { pricingUnit } : {}),
+        ...(merchant !== null ? { merchant } : {}),
+        ...(sourceUrl !== null ? { sourceUrl } : {}),
+        ...(provenanceStatus !== null ? { provenanceStatus } : {}),
+        ...(packageSizeNote !== null ? { packageSizeNote } : {}),
       });
     }
     return items;
@@ -366,6 +391,8 @@ export function getQuoteEvidence(run: ProcurementRun): QuoteEvidence | null {
       hasNegotiatedWinner:
         selectedQuoteId !== null && negotiatedIds.some((id) => id === selectedQuoteId),
       winningTotal: num(financials?.total),
+      lineItems: quoteLineItems(run),
+      pricingEvidence: asRecord(commercial?.pricingEvidence),
       ...(str(commercialSelection?.reason) ? { selectionReason: str(commercialSelection?.reason) } : {}),
     };
   }
@@ -655,7 +682,15 @@ export function getIntentEvidence(run: ProcurementRun): IntentEvidence | null {
       maxAllowed: null,
       mandateCode: null,
       groupsCount: isMulti ? lines.length : null,
-      items: lines.length > 0 ? lines : null,
+      items:
+        lines.length > 0
+          ? lines.map((l) => ({
+              productName: l.productName,
+              quantity: l.quantity,
+              unit: l.unit,
+              ...(l.identitySource ? { identitySource: l.identitySource } : {}),
+            }))
+          : null,
       requestedDeadlineHours: num(sla?.requestedHours),
       operationalSlaHours: num(sla?.operationalGuaranteeHours),
     };

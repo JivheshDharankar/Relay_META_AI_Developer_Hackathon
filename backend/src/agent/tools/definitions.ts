@@ -2473,6 +2473,7 @@ export function buildCommercialEvidence(workflow: RelayWorkflow): {
   comparison: Record<string, unknown> | null;
   negotiations: Array<Record<string, unknown>>;
   selection: Record<string, unknown> | null;
+  pricingEvidence?: Record<string, unknown> | null;
 } {
   const receivedIds = workflow.entities.receivedQuoteIds || [];
   let quotes = receivedIds
@@ -2586,7 +2587,13 @@ export function buildCommercialEvidence(workflow: RelayWorkflow): {
         }
       : null;
 
-  return { quotes, comparison, negotiations, selection };
+  return {
+    quotes,
+    comparison,
+    negotiations,
+    selection,
+    pricingEvidence: (workflow as any)._priceDiscovery || null,
+  };
 }
 
 /**
@@ -2749,6 +2756,27 @@ export const startWorkflowTool: RelayTool = {
     // reaches the agent loop — same precedent as identity binding above.
     const resolved = await resolveWorkflowRequest(args.requestText);
     const resolvedItems = resolved.items;
+
+    // Dynamically resolve resident society location from database if available
+    let locAddress = args.address;
+    let locLat = args.latitude;
+    let locLng = args.longitude;
+    let locCity: string | undefined = undefined;
+
+    try {
+      const society = await prisma.society.findUnique({
+        where: { id: args.societyReference },
+      });
+      if (society) {
+        if (!locAddress && society.address) locAddress = society.address;
+        if (locLat === undefined && society.latitude) locLat = Number(society.latitude);
+        if (locLng === undefined && society.longitude) locLng = Number(society.longitude);
+        locCity = society.city;
+      }
+    } catch {
+      // Prisma lookup failed or in-memory mode; proceed with standard fallbacks
+    }
+
     let workflow: RelayWorkflow | undefined;
     try {
       workflow = await relayOrchestrator.createWorkflow({
@@ -2769,9 +2797,10 @@ export const startWorkflowTool: RelayTool = {
           ...(item.variant !== undefined ? { variant: item.variant } : {}),
         })),
         location: {
-          address: args.address || 'Greenview Residency, Baner, Pune',
-          latitude: args.latitude ?? 18.5204,
-          longitude: args.longitude ?? 73.8567,
+          address: locAddress || 'Greenview Residency, Baner, Pune',
+          latitude: locLat ?? 18.5204,
+          longitude: locLng ?? 73.8567,
+          city: locCity,
         },
         metadata: { ...(ctx?.metadata || {}), runId: ctx?.runId },
         idempotencyKey: args.idempotencyKey,

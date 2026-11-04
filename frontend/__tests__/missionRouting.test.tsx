@@ -95,7 +95,7 @@ describe('mission routing', () => {
     startMock.mockClear();
     pushMock.mockClear();
     render(<CommandCenterPage />);
-    fireEvent.click(screen.getByRole('button', { name: /run 30-second demo mission/i }));
+    fireEvent.click(screen.getByRole('button', { name: /run demo mission/i }));
     expect(startMock).toHaveBeenCalledWith('2 kg rice, 1 kg sugar and 2 packs Maggi');
     expect(pushMock).toHaveBeenCalledWith('/mission');
   });

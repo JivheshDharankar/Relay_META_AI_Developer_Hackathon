@@ -3,11 +3,11 @@ import {
   addDecimals,
   isDecimalEqual,
   isLessThan,
-  multiplyDecimals,
   roundMoney,
   subtractDecimals,
   toDecimal,
 } from '../../../domain/procurement/decimal';
+import { calculateLineSubtotal } from '../../../domain/procurement/quantityNormalizer';
 import { eventBus } from '../../../events';
 import {
   NormalizedQuoteResult,
@@ -104,7 +104,7 @@ export class QuoteNormalizationService {
           hasPartialItem = true;
         }
 
-        // Line Subtotal Calculation (Deterministic Decimal: quotedQuantity × unitPrice)
+        // Line Subtotal Calculation (Deterministic Canonical Decimal: quantity x unitPrice with dimension normalization)
         let lineSubtotal = 0;
         if (
           typeof item.quotedQuantity === 'number' &&
@@ -112,9 +112,11 @@ export class QuoteNormalizationService {
           typeof item.unitPrice === 'number' &&
           item.unitPrice >= 0
         ) {
-          lineSubtotal = roundMoney(
-            multiplyDecimals(item.quotedQuantity, item.unitPrice)
-          ).toNumber();
+          lineSubtotal = calculateLineSubtotal(
+            item.quotedQuantity,
+            item.unit,
+            item.unitPrice
+          );
         }
 
         quoteLineItems.push({
@@ -128,6 +130,11 @@ export class QuoteNormalizationService {
           unitPrice: item.unitPrice,
           lineSubtotal,
           notes: item.notes,
+          pricingUnit: item.pricingUnit,
+          merchant: item.merchant,
+          sourceUrl: item.sourceUrl,
+          provenanceStatus: item.provenanceStatus,
+          packageSizeNote: item.packageSizeNote,
         });
       }
     }

@@ -38,7 +38,15 @@ export function CommandComposer({
   const [value, setValue] = useState(initialValue ?? '');
 
   useEffect(() => {
-    setValue('');
+    if (initialValue !== undefined) {
+      setValue(initialValue);
+    }
+  }, [initialValue]);
+
+  useEffect(() => {
+    if (clearToken > 0) {
+      setValue('');
+    }
   }, [clearToken]);
 
   const submit = () => {

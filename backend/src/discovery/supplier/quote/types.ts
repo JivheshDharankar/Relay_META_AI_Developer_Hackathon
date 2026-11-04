@@ -65,6 +65,15 @@ export interface SupplierResponseLineItem {
    * Optional notes on packaging or SKU specifications.
    */
   notes?: string;
+
+  /**
+   * Price discovery provenance & live web search evidence
+   */
+  pricingUnit?: string;
+  merchant?: string;
+  sourceUrl?: string;
+  provenanceStatus?: string;
+  packageSizeNote?: string;
 }
 
 /**
@@ -229,6 +238,11 @@ export interface QuoteLineItem {
   unitPrice: number;
   lineSubtotal: number;
   notes?: string;
+  pricingUnit?: string;
+  merchant?: string;
+  sourceUrl?: string;
+  provenanceStatus?: string;
+  packageSizeNote?: string;
 }
 
 /**
