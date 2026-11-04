@@ -564,7 +564,7 @@ model PaymentMandate {
 model Payment {
   id                String        @id @default(uuid())
   idempotencyKey    String?       @unique
-  residentOrderId   String
+  residentOrderId   String?
   paymentMandateId  String
   amount            Decimal       @db.Decimal(12, 2)
   currency          String        @default("INR")
@@ -576,8 +576,12 @@ model Payment {
   failedAt          DateTime?
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
+  providerName      String?
+  simulated         Boolean       @default(false)
+  attempts          Json          @default("[]")
+  metadata          Json?
 
-  residentOrder  ResidentOrder  @relation(fields: [residentOrderId], references: [id], onDelete: Cascade)
+  residentOrder  ResidentOrder? @relation(fields: [residentOrderId], references: [id], onDelete: Cascade)
   paymentMandate PaymentMandate @relation(fields: [paymentMandateId], references: [id], onDelete: Restrict)
 
   @@index([residentOrderId])
@@ -680,7 +684,6 @@ model ResidentAllocation {
   updatedAt             DateTime             @updatedAt
 
   residentOrder         ResidentOrder        @relation(fields: [residentOrderId], references: [id], onDelete: Cascade)
-  ledgerEntries         ResidentLedgerEntry[]
 
   @@index([commitmentId])
   @@index([residentOrderId])
@@ -704,8 +707,6 @@ model ResidentLedgerEntry {
   reason            String?
   createdAt         DateTime                  @default(now())
 
-  allocation        ResidentAllocation        @relation(fields: [allocationId], references: [id], onDelete: Cascade)
-
   @@index([residentReference])
   @@index([residentOrderId])
   @@index([allocationId])
@@ -716,7 +717,7 @@ model ResidentLedgerEntry {
 /// Authoritative reconciliation record linking procurement, fulfillment, and resident accounting
 model ReconciliationRecord {
   id                             String               @id @default(uuid())
-  commitmentId                   String               @unique
+  commitmentId                   String
   status                         ReconciliationStatus @default(PENDING)
   verifiedFulfilledQuantity      Decimal              @db.Decimal(10, 4)
   totalAllocatedQuantity         Decimal              @db.Decimal(10, 4)
@@ -729,9 +730,23 @@ model ReconciliationRecord {
   reconciledAt                   DateTime?
   createdAt                      DateTime             @default(now())
   updatedAt                      DateTime             @updatedAt
+  version                        Int                  @default(1)
+  supersedesId                   String?
+  societyId                      String?
+  workflowId                     String?
+  inputHash                      String?
+  inputRefs                      Json?
+  lineItems                      Json?
+  commercialBasisSimulated       Boolean?
+  settlementBasis                String               @default("COMPUTED")
+  idempotencyKey                 String?
+  reason                         String?
 
   discrepancies                  ReconciliationDiscrepancy[]
 
+  @@unique([commitmentId, idempotencyKey])
+  @@unique([commitmentId, version])
+  @@index([commitmentId])
   @@index([status])
   @@map("reconciliation_records")
 }
@@ -778,13 +793,32 @@ model RelayWorkflow {
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
 
-  checkpoints       RelayWorkflowCheckpoint[]
-  events            RelayWorkflowEvent[]
+  checkpoints            RelayWorkflowCheckpoint[]
+  events                 RelayWorkflowEvent[]
+  missionIdempotencyKeys MissionIdempotencyKey[]
 
   @@index([residentReference])
   @@index([status])
   @@index([currentStage])
   @@map("relay_workflows")
+}
+
+/// Idempotency deduplication boundary for mission requests
+model MissionIdempotencyKey {
+  id                String        @id @default(uuid())
+  key               String
+  keyHash           String
+  residentReference String
+  requestHash       String
+  workflowId        String
+  expiresAt         DateTime?
+  createdAt         DateTime      @default(now())
+
+  workflow          RelayWorkflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@unique([residentReference, keyHash])
+  @@index([workflowId])
+  @@map("mission_idempotency_keys")
 }
 
 /// Persistent operational state checkpoint of an active or completed workflow

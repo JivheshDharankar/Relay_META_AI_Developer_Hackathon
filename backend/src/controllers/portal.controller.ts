@@ -342,9 +342,11 @@ export class PortalController {
             failureCode: p.failureCode,
             executedAt: (p.completedAt ?? p.createdAt).toISOString(),
             orderId: p.residentOrderId,
-            itemDescription: p.residentOrder.items
-              .map((i) => `${Number(i.quantity)} ${i.product.unit} ${i.product.name}`)
-              .join(', '),
+            itemDescription: p.residentOrder
+              ? p.residentOrder.items
+                  .map((i) => `${Number(i.quantity)} ${i.product.unit} ${i.product.name}`)
+                  .join(', ')
+              : 'Procurement Payment',
           })),
         },
       });
