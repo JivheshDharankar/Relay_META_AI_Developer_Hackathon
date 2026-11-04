@@ -10,6 +10,7 @@ import React, {
 } from 'react';
 import type { ProcurementRun } from './types';
 import { runIdOf } from './types';
+import { fetchWorkflowRun } from '../api';
 
 const STORAGE_KEY = 'relay:run-history-v1';
 const MAX_RUNS = 10;
@@ -38,6 +39,7 @@ interface RunStore {
   ready: boolean;
   recordRun: (run: ProcurementRun) => void;
   getRun: (runId: string) => ProcurementRun | null;
+  fetchRun: (runId: string) => Promise<ProcurementRun | null>;
   latestRun: ProcurementRun | null;
   clearRuns: () => void;
 }
@@ -82,8 +84,41 @@ export function RunStoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const getRun = useCallback(
-    (runId: string) => runs.find((r) => runIdOf(r) === runId) ?? null,
+    (runId: string) => {
+      const match = runs.find((r) => {
+        const rid = runIdOf(r);
+        if (rid === runId) return true;
+        if (r.agentResponse?.runId === runId) return true;
+        if (
+          runId.startsWith('RUN-') &&
+          r.agentResponse?.runId?.slice(0, 8).toUpperCase() === runId.slice(4).toUpperCase()
+        ) {
+          return true;
+        }
+        return false;
+      });
+      return match ?? null;
+    },
     [runs]
+  );
+
+  const fetchRun = useCallback(
+    async (runId: string): Promise<ProcurementRun | null> => {
+      const cached = getRun(runId);
+      if (cached) return cached;
+
+      try {
+        const remote = await fetchWorkflowRun(runId);
+        if (remote && isStorableRun(remote)) {
+          recordRun(remote);
+          return remote;
+        }
+        return remote ?? null;
+      } catch (err) {
+        throw err;
+      }
+    },
+    [getRun, recordRun]
   );
 
   const clearRuns = useCallback(() => {
@@ -96,10 +131,11 @@ export function RunStoreProvider({ children }: { children: React.ReactNode }) {
       ready,
       recordRun,
       getRun,
+      fetchRun,
       latestRun: runs[0] ?? null,
       clearRuns,
     }),
-    [runs, ready, recordRun, getRun, clearRuns]
+    [runs, ready, recordRun, getRun, fetchRun, clearRuns]
   );
 
   return <RunStoreContext.Provider value={value}>{children}</RunStoreContext.Provider>;

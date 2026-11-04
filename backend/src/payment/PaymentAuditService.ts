@@ -12,7 +12,8 @@ export type PaymentAuditEventType =
   | 'PAYMENT_FAILED'
   | 'PAYMENT_RETRY_REQUESTED'
   | 'PAYMENT_AUTHORIZATION_EXPIRED'
-  | 'PAYMENT_CANCELLED';
+  | 'PAYMENT_CANCELLED'
+  | 'PAYMENT_REFUNDED';
 
 export class PaymentAuditService {
   /**

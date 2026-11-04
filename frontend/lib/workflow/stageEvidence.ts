@@ -128,14 +128,24 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
   // Meta path: the workflow engine drove this run. Its artifacts take
   // precedence; exploratory mock-tool errors from the same run must not shadow
   // the engine's authoritative outcome.
-  const wf = hasWorkflowEngine(run.agentResponse);
+  const wf =
+    hasWorkflowEngine(run.agentResponse) ||
+    tools.has('getWorkflowState') ||
+    tools.has('startWorkflow') ||
+    Boolean(tools.get('startWorkflow')?.workflowId) ||
+    Boolean(asRecord(tools.get('startWorkflow')?.data)?.workflowId);
   const wfEntities = (): Record<string, unknown> | null => {
-    const state = tools.get('getWorkflowState');
-    const data = asRecord(state?.data);
+    const state = tools.get('getWorkflowState') || tools.get('startWorkflow');
+    const data = asRecord(state?.data) || state;
     return asRecord(data?.entities);
   };
-  const wfCommitment = (): Record<string, unknown> | null =>
-    asRecord(tools.get('getProcurementCommitment')?.commitment);
+  const wfCommitment = (): Record<string, unknown> | null => {
+    const direct = asRecord(tools.get('getProcurementCommitment')?.commitment);
+    if (direct) return direct;
+    const state = tools.get('getWorkflowState') || tools.get('startWorkflow');
+    const data = asRecord(state?.data) || state;
+    return asRecord(asRecord(data?.financialProof)?.commitment);
+  };
   const wfIdList = (key: string): unknown[] => {
     const entities = wfEntities();
     return entities && Array.isArray(entities[key]) ? (entities[key] as unknown[]) : [];
@@ -145,9 +155,11 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
   // progress record does not, so completed runs map deterministically.
   const wfProgress = (): Map<string, { status: string | null; completedAt: string | null }> => {
     const map = new Map<string, { status: string | null; completedAt: string | null }>();
-    const state = tools.get('getWorkflowState');
-    const data = asRecord(state?.data);
-    const progress = data && Array.isArray(data.progress) ? (data.progress as unknown[]) : [];
+    const state = tools.get('getWorkflowState') || tools.get('startWorkflow');
+    const data = asRecord(state?.data) || state;
+    const progress =
+      (data && Array.isArray(data.progress) ? (data.progress as unknown[]) : []) ||
+      (state && Array.isArray(state?.progress) ? (state.progress as unknown[]) : []);
     for (const entry of progress) {
       const rec = asRecord(entry);
       const stage = str(rec?.stage);
@@ -158,10 +170,32 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
   const wfProgressMap = wfProgress();
   const wfProgressed = (stage: string): boolean =>
     wfProgressMap.get(stage)?.status === 'COMPLETED';
+  const wfStageFailed = (stage: string): boolean =>
+    wfProgressMap.get(stage)?.status === 'FAILED';
   const wfProgressFacts = (stage: string): StageFact[] => {
     const completedAt = wfProgressMap.get(stage)?.completedAt;
     return completedAt ? [{ label: 'Completed', value: completedAt }] : [];
   };
+
+  // Authoritative workflow failure stage and failure reason detection
+  const wfStateData =
+    asRecord(tools.get('getWorkflowState')?.data) ||
+    tools.get('getWorkflowState') ||
+    asRecord(tools.get('startWorkflow')?.data) ||
+    tools.get('startWorkflow');
+  const wfStatus = str(wfStateData?.status);
+  const wfCurrentStage = str(wfStateData?.currentStage);
+  const explicitFailedEntry = Array.from(wfProgressMap.entries()).find(([, val]) => val.status === 'FAILED');
+  const failedWorkflowStage = explicitFailedEntry
+    ? explicitFailedEntry[0]
+    : wfStatus === 'FAILED' && wfCurrentStage
+      ? wfCurrentStage
+      : null;
+  const wfFailureReason =
+    str(wfStateData?.failureReason) ||
+    toolErrors.get('startWorkflow') ||
+    str(tools.get('startWorkflow')?.error) ||
+    run.error?.message;
 
   const failed = (stage: CanonicalStage, label: string, source: string | null, summary: string, code?: string | null): StageEvidence => ({
     stage, label, state: 'failed', summary, facts: [], source, code: code ?? null,
@@ -176,25 +210,34 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
   // A returned (non-thrown) startWorkflow failure — e.g. a deterministic
   // mandate block — is authoritative evidence of a halted run, on either path.
   const wfAttempt = findSuccessfulToolResult(run.agentResponse, 'startWorkflow');
-  if (wfAttempt && wfAttempt.success === false) {
+  const isExplicitUnderstandFailed =
+    failedWorkflowStage === 'UNDERSTAND' ||
+    (wfAttempt && wfAttempt.success === false && !failedWorkflowStage && !wfProgressed('UNDERSTAND'));
+
+  if (isExplicitUnderstandFailed) {
     out.push(
       failed(
         'UNDERSTAND',
         'Understand',
         'startWorkflow',
-        str(wfAttempt.error) ?? 'Workflow initialization failed.'
+        wfFailureReason ?? str(wfAttempt?.error) ?? 'Workflow initialization failed.'
       )
     );
   } else if (wf) {
     const r = tools.get('startWorkflow');
-    const err = toolErrors.get('startWorkflow');
     const commitment = wfCommitment();
     const product = asRecord(commitment?.product);
-    if (r && r.success !== false) {
+    const hasIntentEvidence =
+      r ||
+      commitment ||
+      wfProgressed('UNDERSTAND') ||
+      (failedWorkflowStage !== null && failedWorkflowStage !== 'UNDERSTAND');
+
+    if (hasIntentEvidence) {
       const qty = num(commitment?.requestedQuantity ?? commitment?.committedQuantity);
       const productName = str(product?.productName);
       const unit = str(product?.unit);
-      const wfId = str(r.workflowId);
+      const wfId = str(r?.workflowId) ?? str(wfStateData?.workflowId);
       // Per-item lines from received quote artifacts (backend evidence).
       // The commitment carries only the primary line plus the SUMMED
       // quantity, so multi-item runs list lines instead of merging them.
@@ -230,8 +273,6 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
         facts,
         source: 'startWorkflow',
       });
-    } else if (err) {
-      out.push(failed('UNDERSTAND', 'Understand', 'startWorkflow', err, toolErrorCodes.get('startWorkflow') ?? null));
     } else {
       out.push(absent('UNDERSTAND', 'Understand', 'No intent evidence in this run.'));
     }
@@ -303,7 +344,9 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
   if (wf) {
     const entities = wfEntities();
     const err = toolErrors.get('getWorkflowState');
-    if (entities) {
+    if (failedWorkflowStage === 'DISCOVER') {
+      out.push(failed('DISCOVER', 'Discover', 'startWorkflow', wfFailureReason ?? 'Supplier discovery failed.'));
+    } else if (entities) {
       const candidates = wfIdList('supplierCandidateIds').length;
       out.push({
         stage: 'DISCOVER',
@@ -311,6 +354,15 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
         state: 'verified',
         summary: `Found ${candidates} commercial candidates through real supplier discovery.`,
         facts: [{ label: 'Candidates', value: String(candidates) }],
+        source: 'getWorkflowState',
+      });
+    } else if (wfProgressed('DISCOVER')) {
+      out.push({
+        stage: 'DISCOVER',
+        label: 'Discover',
+        state: 'verified',
+        summary: 'Commercial supplier discovery completed per engine progress record.',
+        facts: wfProgressFacts('DISCOVER'),
         source: 'getWorkflowState',
       });
     } else if (err) {
@@ -352,7 +404,9 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
   // 3. QUALIFY
   if (wf) {
     const entities = wfEntities();
-    if (entities) {
+    if (failedWorkflowStage === 'QUALIFY') {
+      out.push(failed('QUALIFY', 'Qualify', 'startWorkflow', wfFailureReason ?? 'Supplier qualification failed.'));
+    } else if (entities) {
       const candidates = wfIdList('supplierCandidateIds').length;
       const qualified = wfIdList('qualifiedSupplierIds').length;
       out.push({
@@ -361,6 +415,15 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
         state: 'verified',
         summary: `Qualified ${qualified} of ${candidates} candidates against SLA, radius, and capability constraints.`,
         facts: [{ label: 'Qualified', value: `${qualified} of ${candidates}` }],
+        source: 'getWorkflowState',
+      });
+    } else if (wfProgressed('QUALIFY')) {
+      out.push({
+        stage: 'QUALIFY',
+        label: 'Qualify',
+        state: 'verified',
+        summary: 'Supplier qualification completed per engine progress record.',
+        facts: wfProgressFacts('QUALIFY'),
         source: 'getWorkflowState',
       });
     } else if (toolErrors.get('getWorkflowState')) {
@@ -413,7 +476,9 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
         : single
           ? (str(single.status) === 'VALID' ? 1 : 0)
           : null;
-    if (received > 0 || comparison || single) {
+    if (failedWorkflowStage === 'QUOTE') {
+      out.push(failed('QUOTE', 'Quote', 'startWorkflow', wfFailureReason ?? 'Quote evaluation failed.'));
+    } else if (received > 0 || comparison || single) {
       const facts: StageFact[] = [{ label: 'Quotes received', value: String(Math.max(received, eligible ?? 0)) }];
       if (eligible !== null) facts.push({ label: 'Eligible', value: String(eligible) });
       const simulated =
@@ -472,7 +537,9 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
   // 5. NEGOTIATE
   if (wf) {
     const negotiated = wfIdList('negotiatedQuoteIds').length;
-    if (negotiated > 0) {
+    if (failedWorkflowStage === 'NEGOTIATE') {
+      out.push(failed('NEGOTIATE', 'Negotiate', 'startWorkflow', wfFailureReason ?? 'Supplier negotiation failed.'));
+    } else if (negotiated > 0) {
       out.push({
         stage: 'NEGOTIATE',
         label: 'Negotiate',
@@ -531,7 +598,9 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
     const alloc = commitment && Array.isArray(commitment.allocations)
       ? asRecord((commitment.allocations as unknown[])[0])
       : null;
-    if (commitment && alloc) {
+    if (failedWorkflowStage === 'SELECT') {
+      out.push(failed('SELECT', 'Select', 'startWorkflow', wfFailureReason ?? 'Supplier selection failed.'));
+    } else if (commitment && alloc) {
       const name = str(alloc.supplierName) ?? 'supplier';
       const total = num(alloc.totalAmount);
       const sla = num(alloc.deliveryEtaHours);
@@ -592,7 +661,9 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
   // 7. COMMIT
   if (wf) {
     const commitment = wfCommitment();
-    if (commitment) {
+    if (failedWorkflowStage === 'COMMIT') {
+      out.push(failed('COMMIT', 'Commit', 'startWorkflow', wfFailureReason ?? 'Procurement commitment failed.'));
+    } else if (commitment) {
       const financials = asRecord(commitment.financials);
       const total = num(financials?.total);
       out.push({
@@ -649,13 +720,19 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
   if (wf) {
     const entities = wfEntities();
     const commitment = wfCommitment();
-    const recon = tools.get('getReconciliationStatus');
-    const paymentId = str(entities?.paymentId);
-    const status = str(commitment?.status);
-    const amount = num(asRecord(commitment?.financials)?.total);
+    const state = tools.get('getWorkflowState') || tools.get('startWorkflow');
+    const data = asRecord(state?.data) || state;
+    const proof = asRecord(data?.financialProof);
+    const proofPayment = asRecord(proof?.payment);
+    const recon = tools.get('getReconciliationStatus') || asRecord(proof?.reconciliation);
+    const paymentId = str(entities?.paymentId) || str(proofPayment?.id);
+    const status = str(proofPayment?.status) || str(commitment?.status);
+    const amount = num(proofPayment?.amount) ?? num(asRecord(commitment?.financials)?.total);
     const verified = recon?.isPaymentVerified === true;
-    if (paymentId || (commitment && status === 'PAID')) {
-      const ok = status === null || status === 'PAID' || verified;
+    if (failedWorkflowStage === 'PAY') {
+      out.push(failed('PAY', 'Pay', 'startWorkflow', wfFailureReason ?? 'Payment execution failed.'));
+    } else if (paymentId || proofPayment || (commitment && (status === 'PAID' || status === 'SUCCEEDED'))) {
+      const ok = status === null || status === 'PAID' || status === 'SUCCEEDED' || verified;
       out.push({
         stage: 'PAY',
         label: 'Pay',
@@ -721,9 +798,46 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
 
   // 9. FULFILL + 10. VERIFY share delivery evidence
   if (wf) {
-    const order = asRecord(tools.get('getFulfillmentState')?.order);
+    const state = tools.get('getWorkflowState') || tools.get('startWorkflow');
+    const data = asRecord(state?.data) || state;
+    const proof = asRecord(data?.financialProof);
+    const order = asRecord(tools.get('getFulfillmentState')?.order) || asRecord(proof?.fulfillment);
     const err = toolErrors.get('getFulfillmentState');
-    if (err) {
+    if (failedWorkflowStage === 'FULFILL') {
+      out.push(failed('FULFILL', 'Fulfill', 'startWorkflow', wfFailureReason ?? 'Fulfillment execution failed.'));
+      out.push(absent('VERIFY', 'Verify', 'Verification blocked: fulfillment failed.'));
+    } else if (failedWorkflowStage === 'VERIFY') {
+      if (order) {
+        const status = str(order.status);
+        const tracking = str(order.trackingReference);
+        out.push({
+          stage: 'FULFILL',
+          label: 'Fulfill',
+          state: 'verified',
+          summary: status
+            ? `Fulfillment ${status.toLowerCase().replace(/_/g, ' ')}${tracking ? ` · tracking ${tracking}` : ''}.`
+            : 'Fulfillment tracked.',
+          facts: [
+            ...(status ? [{ label: 'Status', value: status }] : []),
+            ...(tracking ? [{ label: 'Tracking', value: tracking }] : []),
+            ...(str(order.purchaseOrderId) ? [{ label: 'Supplier PO', value: order.purchaseOrderId as string }] : []),
+          ],
+          source: 'getFulfillmentState',
+        });
+      } else if (wfProgressed('FULFILL')) {
+        out.push({
+          stage: 'FULFILL',
+          label: 'Fulfill',
+          state: 'verified',
+          summary: 'Fulfillment completed per engine progress record.',
+          facts: wfProgressFacts('FULFILL'),
+          source: 'getWorkflowState',
+        });
+      } else {
+        out.push(absent('FULFILL', 'Fulfill', 'No fulfillment evidence in this run.'));
+      }
+      out.push(failed('VERIFY', 'Verify', 'startWorkflow', wfFailureReason ?? 'Delivery verification failed.'));
+    } else if (err) {
       out.push(failed('FULFILL', 'Fulfill', 'getFulfillmentState', err));
       out.push(failed('VERIFY', 'Verify', 'getFulfillmentState', err));
     } else if (order) {
@@ -857,9 +971,14 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
 
   // 11. ALLOCATE
   if (wf) {
-    const summary = tools.get('getAllocationSummary');
+    const state = tools.get('getWorkflowState') || tools.get('startWorkflow');
+    const data = asRecord(state?.data) || state;
+    const proof = asRecord(data?.financialProof);
+    const summary = tools.get('getAllocationSummary') || asRecord(proof?.allocation);
     const err = toolErrors.get('getAllocationSummary');
-    if (err) {
+    if (failedWorkflowStage === 'ALLOCATE') {
+      out.push(failed('ALLOCATE', 'Allocate', 'startWorkflow', wfFailureReason ?? 'Resident cost allocation failed.'));
+    } else if (err) {
       out.push(failed('ALLOCATE', 'Allocate', 'getAllocationSummary', err));
     } else if (summary) {
       const requested = num(summary.totalRequestedQuantity);
@@ -919,9 +1038,14 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
 
   // 12. RECONCILE
   if (wf) {
-    const r = tools.get('getReconciliationStatus');
+    const state = tools.get('getWorkflowState') || tools.get('startWorkflow');
+    const data = asRecord(state?.data) || state;
+    const proof = asRecord(data?.financialProof);
+    const r = tools.get('getReconciliationStatus') || asRecord(proof?.reconciliation);
     const err = toolErrors.get('getReconciliationStatus');
-    if (err) {
+    if (failedWorkflowStage === 'RECONCILE') {
+      out.push(failed('RECONCILE', 'Reconcile', 'startWorkflow', wfFailureReason ?? 'Order reconciliation failed.'));
+    } else if (err) {
       out.push(failed('RECONCILE', 'Reconcile', 'getReconciliationStatus', err));
     } else if (r) {
       const qp = r.isQuantityMatched === true;
@@ -929,7 +1053,9 @@ export function mapRunToStages(run: ProcurementRun): StageEvidence[] {
       const sp = r.isSupplierObligationsMatched === true;
       const pp = r.isPaymentVerified === true;
       const status = str(r.status);
-      const openCount = num(r.discrepancyCount);
+      const openCount =
+        num(r.discrepancyCount) ??
+        (Array.isArray(r.discrepancies) ? r.discrepancies.length : 0);
       const checks: StageFact[] = [
         { label: 'Quantity', value: qp ? 'passed' : 'FAILED' },
         { label: 'Financial', value: fp ? 'passed' : 'FAILED' },

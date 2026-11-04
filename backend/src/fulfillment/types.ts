@@ -44,6 +44,21 @@ export interface VerificationEvidence {
 }
 
 /**
+ * Product-specific line item on a Fulfillment Order.
+ * Preserves individual product identity, unit, requested, and fulfilled quantities.
+ */
+export interface FulfillmentOrderLine {
+  lineNumber: number;
+  productId?: string | null;
+  productName: string;
+  sku?: string | null;
+  requestedQuantity: number;
+  fulfilledQuantity: number;
+  remainingQuantity: number;
+  unit: string;
+}
+
+/**
  * Authoritative Fulfillment Order domain entity linking paid procurement commitments
  * and purchase orders to real-world operational execution.
  */
@@ -56,6 +71,7 @@ export interface FulfillmentOrder {
   supplierName: string;
   fulfillmentType: FulfillmentType;
   status: FulfillmentStatus;
+  lines?: FulfillmentOrderLine[];
   productName: string;
   requestedQuantity: number;
   fulfilledQuantity: number;

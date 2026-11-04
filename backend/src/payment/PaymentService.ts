@@ -253,6 +253,10 @@ export class PaymentService {
     this.executionSvc.reset();
   }
 
+  public async clearDurableClaims(): Promise<void> {
+    await this.executionSvc.clearDurableClaims();
+  }
+
   private buildPaymentSummary(commitmentId: string): ProcurementPaymentSummary {
     const commitment = this.commitmentSvc.getCommitment(commitmentId);
     if (!commitment) {

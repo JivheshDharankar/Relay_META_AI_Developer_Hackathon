@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft, ArrowRight, CheckCircle2, CircleDashed, XCircle } from 'lucide-react';
 import { Container } from '@/components/ui';
@@ -12,6 +12,8 @@ import { mapRunToStages, type CanonicalStage } from '@/lib/workflow/stageEvidenc
 import { getStageIntelligence } from '@/lib/workflow/intelligence';
 import { shortRef } from '@/lib/format';
 import { cn } from '@/lib/utils';
+import type { ProcurementRun } from '@/lib/workflow/types';
+import { ApiClientError } from '@/lib/api/client';
 
 export const STAGE_ROUTE_ORDER: { slug: string; stage: CanonicalStage; label: string }[] = [
   { slug: 'understand', stage: 'UNDERSTAND', label: 'Understand' },
@@ -41,8 +43,44 @@ export function StageDetailShell({
   description: string;
   children: (run: NonNullable<ReturnType<ReturnType<typeof useRunStore>['getRun']>>) => React.ReactNode;
 }) {
-  const { getRun, ready } = useRunStore();
-  const run = ready ? getRun(runId) : null;
+  const { getRun, fetchRun, ready } = useRunStore();
+  const localRun = ready ? getRun(runId) : null;
+  const [remoteRun, setRemoteRun] = useState<ProcurementRun | null>(null);
+  const [fetching, setFetching] = useState(false);
+  const [fetchError, setFetchError] = useState<{ code: string; message: string } | null>(null);
+
+  useEffect(() => {
+    if (ready && !localRun && !remoteRun && !fetching && !fetchError && runId) {
+      setFetching(true);
+      fetchRun(runId)
+        .then((fetched) => {
+          setRemoteRun(fetched);
+          setFetching(false);
+        })
+        .catch((err) => {
+          setFetching(false);
+          if (err instanceof ApiClientError && err.status === 403) {
+            setFetchError({
+              code: 'FORBIDDEN',
+              message: 'You are not authorized to view this mission record.',
+            });
+          } else if (err instanceof ApiClientError && err.status === 404) {
+            setFetchError({
+              code: 'NOT_FOUND',
+              message: `Procurement mission '${runId}' could not be found.`,
+            });
+          } else {
+            setFetchError({
+              code: 'ERROR',
+              message: err instanceof Error ? err.message : 'Failed to retrieve mission record.',
+            });
+          }
+        });
+    }
+  }, [ready, localRun, remoteRun, fetching, fetchError, fetchRun, runId]);
+
+  const run = localRun || remoteRun;
+  const isLoading = !ready || (fetching && !run);
   const entry = STAGE_ROUTE_ORDER.find((s) => s.slug === slug)!;
   const index = STAGE_ROUTE_ORDER.indexOf(entry);
   const prev = index > 0 ? STAGE_ROUTE_ORDER[index - 1] : null;
@@ -65,18 +103,27 @@ export function StageDetailShell({
             <span className="font-semibold text-relay-ink-900">{entry.label}</span>
           </nav>
 
-          {!ready && <LoadingState title={`Loading ${entry.label.toLowerCase()}`} />}
+          {isLoading && <LoadingState title={`Loading ${entry.label.toLowerCase()}`} />}
 
-          {ready && !run && (
+          {!isLoading && fetchError && (
             <EmptyState
-              title="Run not found"
-              description="This run is not in the current tab session."
+              title={fetchError.code === 'FORBIDDEN' ? 'Access Denied' : 'Run not found'}
+              description={fetchError.message}
               actionLabel="All runs"
               onAction={() => (window.location.href = '/runs')}
             />
           )}
 
-          {ready && run && evidence && (
+          {!isLoading && !fetchError && !run && (
+            <EmptyState
+              title="Run not found"
+              description="This run is not in the active session or backend archive."
+              actionLabel="All runs"
+              onAction={() => (window.location.href = '/runs')}
+            />
+          )}
+
+          {!isLoading && run && evidence && (
             <>
               <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
                 <div>

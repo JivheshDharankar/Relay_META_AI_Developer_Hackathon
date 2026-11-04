@@ -7,6 +7,7 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.string().default('4000').transform((val) => parseInt(val, 10)),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+  TEST_DATABASE_URL: z.string().optional(),
   CORS_ORIGIN: z.string().default('http://localhost:3000'),
 
   // Agent Layer Configuration
@@ -14,7 +15,10 @@ const envSchema = z.object({
   MAX_AGENT_STEPS: z.string().default('20').transform((val) => parseInt(val, 10)),
 
   // Optional Meta Model Provider Config (never required for builds or tests)
-  META_MODEL_API_KEY: z.string().optional(),
+  META_MODEL_API_KEY: z
+    .string()
+    .optional()
+    .transform((val) => val || process.env.MODEL_API_KEY),
   META_MODEL_NAME: z.string().default('muse-spark-1.3'),
   META_MODEL_BASE_URL: z.string().default('https://api.meta.ai/v1'),
   META_MODEL_TIMEOUT_MS: z.string().default('30000').transform((val) => parseInt(val, 10)),
@@ -46,9 +50,13 @@ const envSchema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_REDIRECT_URI: z.string().default('http://localhost:4000/api/auth/google/callback'),
 
-  // Phone / SMS OTP Provider (Twilio)
+  // Phone / SMS OTP Provider (Twilio Verify)
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),
+  TWILIO_VERIFY_SERVICE_SID: z
+    .string()
+    .optional()
+    .transform((val) => val || process.env.TWILIO_SERVICE_SID),
   TWILIO_PHONE_NUMBER: z.string().optional(),
   SMS_PROVIDER: z.enum(['twilio', 'mock']).default('mock'),
 

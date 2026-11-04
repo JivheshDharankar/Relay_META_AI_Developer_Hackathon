@@ -38,6 +38,29 @@ import { SupplierCandidate } from '../src/discovery/supplier/types';
 
 const CTX = {} as never;
 
+let mandateCounter = 0;
+
+/**
+ * Starts a workflow whose resident holds a REAL mandate created through
+ * the mandate service. Relay never auto-creates mandate consent, so a
+ * workflow that must reach PAY needs this explicit fixture.
+ */
+async function startWithMandate(requestText = 'I need 2 kg sugar.') {
+  mandateCounter += 1;
+  const residentReference = `res_finproof_${mandateCounter}`;
+  const societyReference = 'soc_greenview_pune';
+  defaultMandateService.createMandate({
+    ownerReference: residentReference,
+    purpose: 'COMMUNITY_PROCUREMENT',
+    spendingLimit: 1000000,
+    currency: 'INR',
+  });
+  return startWorkflowTool.execute(
+    { requestText, residentReference, societyReference },
+    { residentId: residentReference, societyId: societyReference } as never,
+  );
+}
+
 /** Server execution context for the workflow's owning resident. */
 function ctxFor(workflowId: string) {
   const wf = relayOrchestrator.getWorkflow(workflowId)!;
@@ -56,10 +79,7 @@ describe('Financial proof evidence block', () => {
   });
 
   it('startWorkflow attaches a complete financialProof snapshot without any detail getter call', async () => {
-    const result = await startWorkflowTool.execute(
-      { requestText: 'I need 2 kg sugar.' },
-      CTX
-    );
+    const result = await startWithMandate();
     expect(result.success).toBe(true);
     expect(result.data.status).toBe('COMPLETED');
 
@@ -99,10 +119,7 @@ describe('Financial proof evidence block', () => {
   });
 
   it('financialProof values equal the detail getters’ values for the same run', async () => {
-    const started = await startWorkflowTool.execute(
-      { requestText: 'I need 2 kg sugar.' },
-      CTX
-    );
+    const started = await startWithMandate();
     const workflowId = (started.data as any).workflowId as string;
     const state = await getWorkflowStateTool.execute({ workflowId }, ctxFor(workflowId));
     const proof = (state.data as any).financialProof as Record<string, any>;

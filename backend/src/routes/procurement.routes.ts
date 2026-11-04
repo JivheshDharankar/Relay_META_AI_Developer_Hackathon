@@ -2,12 +2,13 @@ import { Router } from 'express';
 import { procurementController } from '../controllers/procurement.controller';
 import { requireAuth } from '../middleware/auth.middleware';
 import { requireProcurementScope } from '../middleware/authorization.middleware';
+import { createRateLimiter } from '../middleware/rate-limit.middleware';
 
 const router = Router();
 
 // All procurement endpoints move money or mutate shared orders: authenticated
 // callers only, with targets bound to the session resident/society.
-router.use(requireAuth, requireProcurementScope());
+router.use(requireAuth, requireProcurementScope(), createRateLimiter('PROCUREMENT_MUTATION'));
 
 router.post('/validate', (req, res, next) => procurementController.validateRequest(req, res, next));
 router.post('/authorize', (req, res, next) => procurementController.checkAuthorization(req, res, next));

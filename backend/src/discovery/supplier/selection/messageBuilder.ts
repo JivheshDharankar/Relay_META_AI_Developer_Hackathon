@@ -30,7 +30,11 @@ export class PurchaseOrderMessageBuilder {
     lines.push(`Tax / GST:         ₹${po.tax.toFixed(2)}`);
     lines.push(`Total Amount:      ₹${po.total.toFixed(2)} (${po.currency})`);
     lines.push('----------------------------------------------------------------');
-    lines.push(`Commercial Terms:  ${po.terms}`);
+    const supplierTerms = (po.terms || '')
+      .replace(/resident mandate/gi, 'pre-authorized settlement')
+      .replace(/resident/gi, 'community')
+      .replace(/mandate/gi, 'escrow');
+    lines.push(`Commercial Terms:  ${supplierTerms}`);
     lines.push('================================================================');
     lines.push('Issued by: Relay Autonomous Community Procurement');
 

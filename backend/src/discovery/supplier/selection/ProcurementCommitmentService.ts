@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { roundMoney } from '../../../domain/procurement/decimal';
 import { eventBus } from '../../../events';
 import { RFQService, rfqService } from '../rfq/RFQService';
 import { Quote } from '../quote/types';
@@ -155,7 +156,49 @@ export class ProcurementCommitmentService {
 
         // 4. Construct Proposed Allocations
         const quoteMap = new Map(quotes.map((q) => [q.id, q]));
-        const requestedQuantity = rfq.lineItems.reduce((acc, li) => acc + li.quantity, 0);
+        const totalQuotedUnits = rfq.lineItems.reduce((acc, li) => acc + li.quantity, 0);
+
+        // Represent procurement commitments using individually identified line items.
+        // Never sum quantities across heterogeneous products or measurement units.
+        const selectedQuote = quoteMap.get(input.recommendation.quoteId!) || quotes[0];
+        const items = rfq.lineItems.map((li, idx) => {
+          const qLine = selectedQuote?.lineItems?.find(
+            (ql) =>
+              (ql.productId && li.productId && ql.productId === li.productId) ||
+              ql.productName.toLowerCase() === li.productName.toLowerCase() ||
+              ql.productName.toLowerCase().includes(li.productName.toLowerCase()) ||
+              li.productName.toLowerCase().includes(ql.productName.toLowerCase())
+          ) || selectedQuote?.lineItems?.[idx];
+
+          const unitPrice = qLine?.unitPrice;
+          const lineSubtotal =
+            qLine?.lineSubtotal ??
+            (unitPrice !== undefined ? roundMoney(unitPrice * li.quantity).toNumber() : undefined);
+
+          return {
+            lineNumber: idx + 1,
+            productId: li.productId || qLine?.productId || null,
+            productName: li.productName,
+            sku: (qLine as any)?.sku || undefined,
+            requestedQuantity: li.quantity,
+            unit: li.unit,
+            committedQuantity: li.quantity,
+            unitPrice,
+            lineSubtotal,
+            identitySource: (li as any).identitySource,
+          };
+        });
+
+        const isSingleProduct = rfq.lineItems.length === 1;
+        const allSameUnit = rfq.lineItems.every(
+          (li) => li.unit.toLowerCase() === rfq.lineItems[0].unit.toLowerCase()
+        );
+        // Never assign cross-unit numerical sums to requestedQuantity.
+        const scalarQuantity = isSingleProduct
+          ? rfq.lineItems[0].quantity
+          : allSameUnit
+            ? rfq.lineItems.reduce((acc, li) => acc + li.quantity, 0)
+            : rfq.lineItems[0].quantity;
 
         let proposedAllocations: ProposedAllocation[];
         if (input.recommendation.decision === 'SELECT_SUPPLIER') {
@@ -163,7 +206,7 @@ export class ProcurementCommitmentService {
             {
               supplierId: input.recommendation.supplierId!,
               quoteId: input.recommendation.quoteId!,
-              quantity: requestedQuantity,
+              quantity: totalQuotedUnits,
             },
           ];
         } else if (input.recommendation.decision === 'SPLIT_ORDER') {
@@ -209,14 +252,15 @@ export class ProcurementCommitmentService {
           societyId: rfq.societyId,
           selectedQuoteIds: proposedAllocations.map((a) => a.quoteId),
           supplierIds: proposedAllocations.map((a) => a.supplierId),
+          items,
           product: {
             productId: primaryLine?.productId,
             productName: primaryLine?.productName || 'Procured product',
             unit: primaryLine?.unit || 'units',
           },
           lineItems: rfq.lineItems,
-          requestedQuantity,
-          committedQuantity: requestedQuantity,
+          requestedQuantity: scalarQuantity,
+          committedQuantity: scalarQuantity,
           allocations: allocationPlan.allocations,
           financials: allocationPlan.financials,
           deliveryDeadline: rfq.deliveryDeadline,

@@ -2,12 +2,13 @@ import { Router } from 'express';
 import { executionController } from '../controllers/execution.controller';
 import { requireAuth } from '../middleware/auth.middleware';
 import { requireProcurementScope } from '../middleware/authorization.middleware';
+import { createRateLimiter } from '../middleware/rate-limit.middleware';
 
 const router = Router();
 
 // All execution endpoints move money or mutate shared orders: authenticated
 // callers only, with targets bound to the session resident/society.
-router.use(requireAuth, requireProcurementScope());
+router.use(requireAuth, requireProcurementScope(), createRateLimiter('PAYMENT_EXECUTION'));
 
 // Payment execution
 router.post('/payment', (req, res, next) => executionController.executePayment(req, res, next));

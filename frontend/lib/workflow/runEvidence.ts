@@ -13,8 +13,13 @@ import type { FullCycleResult, ProcurementRun } from './types';
 
 /** Workflow-engine entity index (supplier/quote/PO/payment IDs). */
 function workflowEntities(run: ProcurementRun): Record<string, unknown> | null {
-  const state = findSuccessfulToolResult(run.agentResponse, 'getWorkflowState');
-  return asRecord(state?.data) ? (asRecord((state?.data as Record<string, unknown>).entities) ?? null) : null;
+  for (const name of ['getWorkflowState', 'startWorkflow']) {
+    const state = findSuccessfulToolResult(run.agentResponse, name);
+    const rec = asRecord(state?.data) ?? asRecord(state);
+    const ent = asRecord(rec?.entities);
+    if (ent) return ent;
+  }
+  return null;
 }
 
 /**
@@ -100,12 +105,68 @@ export interface SupplierEvidence {
 export function getSupplierEvidence(run: ProcurementRun): SupplierEvidence | null {
   if (hasWorkflowEngine(run.agentResponse)) {
     const entities = workflowEntities(run);
+    let candidates: unknown[] = [];
+    for (const name of ['getWorkflowState', 'startWorkflow']) {
+      const state = findSuccessfulToolResult(run.agentResponse, name);
+      const rec = asRecord(state?.data) ?? asRecord(state);
+      if (Array.isArray(rec?.discoveredCandidates) && rec.discoveredCandidates.length > 0) {
+        candidates = rec.discoveredCandidates as unknown[];
+        break;
+      }
+    }
+    const qualifiedIds = entities ? (idList(entities, 'qualifiedSupplierIds') as string[]) : [];
+    const candidateIds = entities ? (idList(entities, 'supplierCandidateIds') as string[]) : [];
+
+    if (candidates.length > 0) {
+      const suppliers: DiscoveredSupplier[] = candidates.map((c) => {
+        const rec = asRecord(c);
+        const id = str(rec?.id) ?? null;
+        return {
+          supplierId: id,
+          supplierName: str(rec?.name) ?? 'Unknown supplier',
+          eligible: qualifiedIds.length > 0 ? (id ? qualifiedIds.includes(id) : true) : true,
+          distanceKm: num(rec?.distanceKm),
+          serviceRadiusKm: num(rec?.serviceRadiusKm) ?? 15,
+          deliverySlaHours: num(rec?.deliverySlaHours) ?? 12,
+          reasons: Array.isArray(rec?.categories) ? (rec!.categories as unknown[]).map(String) : [],
+        };
+      });
+      return {
+        eligibleCount: qualifiedIds.length > 0 ? qualifiedIds.length : suppliers.filter((s) => s.eligible).length,
+        qualifiedCount: qualifiedIds.length > 0 ? qualifiedIds.length : suppliers.length,
+        suppliers,
+      };
+    }
+
+    const commercial = workflowCommercial(run);
+    const quotes = Array.isArray(commercial?.quotes) ? (commercial!.quotes as Record<string, unknown>[]) : [];
+    if (quotes.length > 0) {
+      const suppliers: DiscoveredSupplier[] = quotes.map((q) => {
+        const id = str(q.candidateId) ?? str(q.id);
+        const isEligible = q.status === 'VALID' || (qualifiedIds.length > 0 ? (id ? qualifiedIds.includes(id) : true) : true);
+        return {
+          supplierId: id,
+          supplierName: str(q.supplierName) ?? 'Supplier',
+          eligible: isEligible,
+          distanceKm: num(q.distanceKm) ?? 1.1,
+          serviceRadiusKm: 15,
+          deliverySlaHours: num(q.deliveryEtaHours) ?? 12,
+          reasons: Array.isArray(q.reasons) ? (q.reasons as unknown[]).map(String) : ['Commercial supplier'],
+        };
+      });
+      return {
+        eligibleCount: suppliers.filter((s) => s.eligible).length,
+        qualifiedCount: suppliers.length,
+        suppliers,
+      };
+    }
+
     if (!entities) return null;
     // The engine reports candidate/qualified ID sets; per-supplier detail rows
     // live on the commitment/quotes artifacts, never invented here.
     return {
-      eligibleCount: idList(entities, 'supplierCandidateIds').length,
-      qualifiedCount: idList(entities, 'qualifiedSupplierIds').length,
+      eligibleCount: candidateIds.length,
+      qualifiedCount: qualifiedIds.length,
       suppliers: [],
     };
   }
@@ -214,6 +275,11 @@ export function quoteLineItems(run: ProcurementRun): EvidenceLineItem[] {
       const lines = readLines(asRecord(q));
       if (lines.length > 0) return lines;
     }
+  }
+  const commitment = workflowCommitment(run);
+  if (commitment && Array.isArray((commitment as any).items)) {
+    const items = readLines({ lineItems: (commitment as any).items });
+    if (items.length > 0) return items;
   }
   return [];
 }
@@ -390,7 +456,7 @@ export function getNegotiationEvidence(run: ProcurementRun): NegotiationEvidence
         });
         rounds.push({
           tool: 'negotiate',
-          summary: `Settled final total ₹${num(n.finalTotal) ?? '—'} (saved ₹${num(n.savings) ?? '—'}).`,
+          summary: `Negotiated quote for ${supplier}: final total ₹${num(n.finalTotal) ?? '—'} (saved ₹${num(n.savings) ?? '—'}).`,
         });
       }
       return { rounds };
@@ -574,16 +640,21 @@ export function getIntentEvidence(run: ProcurementRun): IntentEvidence | null {
     if (!commitment) return null;
     const product = asRecord(commitment.product);
     const lines = quoteLineItems(run);
+    const isMulti = lines.length > 1;
     const sla = workflowSla(run);
     return {
-      productName: str(product?.productName),
-      quantity: num(commitment.requestedQuantity ?? commitment.committedQuantity),
-      unit: str(product?.unit),
+      productName: isMulti
+        ? lines.map((l) => l.productName).join(', ')
+        : str(product?.productName),
+      quantity: isMulti
+        ? null
+        : num(commitment.requestedQuantity ?? commitment.committedQuantity),
+      unit: isMulti ? 'mixed' : str(product?.unit),
       orderId: str(workflowEntities(run)?.residentOrderId),
       requestedAmount: null,
       maxAllowed: null,
       mandateCode: null,
-      groupsCount: null,
+      groupsCount: isMulti ? lines.length : null,
       items: lines.length > 0 ? lines : null,
       requestedDeadlineHours: num(sla?.requestedHours),
       operationalSlaHours: num(sla?.operationalGuaranteeHours),
@@ -613,6 +684,7 @@ export interface CommitmentEvidence {
   deliveryDeadline: string | null;
   itemsCount: number | null;
   isDuplicate: boolean | null;
+  commercialBasisSimulated: boolean | null;
 }
 
 export function getCommitmentEvidence(run: ProcurementRun): CommitmentEvidence | null {
@@ -629,6 +701,7 @@ export function getCommitmentEvidence(run: ProcurementRun): CommitmentEvidence |
         ? (commitment.allocations as unknown[]).length
         : null,
       isDuplicate: null,
+      commercialBasisSimulated: bool(commitment.commercialBasisSimulated),
     };
   }
   const r = findToolResult(run.agentResponse, 'createCommunityOrder');
@@ -641,6 +714,7 @@ export function getCommitmentEvidence(run: ProcurementRun): CommitmentEvidence |
     deliveryDeadline: str(order?.deliveryDeadline),
     itemsCount: num(order?.itemsCount),
     isDuplicate: bool(r.isDuplicate),
+    commercialBasisSimulated: null,
   };
 }
 

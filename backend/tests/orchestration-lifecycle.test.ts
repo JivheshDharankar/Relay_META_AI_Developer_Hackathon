@@ -27,6 +27,22 @@ import {
   resumeWorkflowTool,
   explainWorkflowTool,
 } from '../src/agent/tools';
+import { mandateService } from '../src/payment/mandate/MandateService';
+
+/**
+ * Relay never fabricates mandate consent: workflows that must reach PAY
+ * hold a real mandate created through the mandate service for their
+ * resident. Tests create it explicitly instead of relying on any
+ * auto-provisioning.
+ */
+function ensureTestMandate(residentReference: string): void {
+  mandateService.createMandate({
+    ownerReference: residentReference,
+    purpose: 'COMMUNITY_PROCUREMENT',
+    spendingLimit: 1000000,
+    currency: 'INR',
+  });
+}
 
 describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', () => {
   let orchestrator: RelayOrchestrator;
@@ -412,14 +428,18 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
     });
 
     it('24. produces separate audit event streams for concurrent workflows', async () => {
+      ensureTestMandate('res_audit_a');
+      ensureTestMandate('res_audit_b');
       const [w1, w2] = await Promise.all([
         orchestrator.startWorkflow({
           requestText: '5 Dairy Milk',
           location: { latitude: 18.5204, longitude: 73.8567 },
+          residentReference: 'res_audit_a',
         }),
         orchestrator.startWorkflow({
           requestText: '2 kg basmati rice',
           location: { latitude: 18.5204, longitude: 73.8567 },
+          residentReference: 'res_audit_b',
         }),
       ]);
 
@@ -799,9 +819,11 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
     });
 
     it('59. prevents double payment during recovery when payment is already verified in backend', async () => {
+      ensureTestMandate('res_recovery_59');
       const wf = await orchestrator.createWorkflow({
         requestText: '5 Dairy Milk',
         location: { latitude: 18.5204, longitude: 73.8567 },
+        residentReference: 'res_recovery_59',
       });
 
       // Advance through PAY (8 steps)
@@ -907,9 +929,11 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
   // ===========================================================================
   describe('9. Section 59 Completion Invariants (7-Pillar Integrity)', () => {
     it('64. passes validation when all 7 authoritative entities are present', async () => {
+      ensureTestMandate('res_invariants_64');
       const wf = await orchestrator.startWorkflow({
         requestText: '5 Dairy Milk',
         location: { latitude: 18.5204, longitude: 73.8567 },
+        residentReference: 'res_invariants_64',
       });
 
       expect(() => validateCompletionInvariants(wf)).not.toThrow();
@@ -963,9 +987,11 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
   // ===========================================================================
   describe('10. Payment Safety & Financial Invariants', () => {
     it('72. derives payment amount authoritatively from commitment financials (AI never sets amount)', async () => {
+      ensureTestMandate('res_pay_72');
       const wf = await orchestrator.startWorkflow({
         requestText: '5 Dairy Milk',
         location: { latitude: 18.5204, longitude: 73.8567 },
+        residentReference: 'res_pay_72',
       });
 
       expect(wf.entities.paymentId).toBeDefined();
@@ -984,20 +1010,27 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
       expect(financials.total).toBeCloseTo(expectedTotal, 2);
     });
 
-    it('74. creates payment mandate automatically within spending limits', async () => {
+    it('74. never fabricates a payment mandate: PAY fails closed without one', async () => {
       const wf = await orchestrator.startWorkflow({
         requestText: '5 Dairy Milk',
         location: { latitude: 18.5204, longitude: 73.8567 },
-        residentReference: 'res_mandate_test',
+        residentReference: `res_nomandate_${Math.random().toString(36).slice(2, 10)}`,
       });
 
-      expect(wf.status).toBe('COMPLETED');
+      // No mandate was created for this resident (neither persisted nor in
+      // the mandate service): the workflow must NOT complete and must
+      // report the missing mandate instead of auto-creating consent.
+      expect(wf.status).toBe('FAILED');
+      expect(wf.failureReason).toContain('MANDATE_NOT_FOUND');
+      expect(wf.entities.paymentId).toBeUndefined();
     });
 
     it('75. guarantees zero double-charge when workflow step execution is retried', async () => {
+      ensureTestMandate('res_pay_75');
       const wf = await orchestrator.createWorkflow({
         requestText: '5 Dairy Milk',
         location: { latitude: 18.5204, longitude: 73.8567 },
+        residentReference: 'res_pay_75',
       });
 
       // Advance through PAY stage
@@ -1033,9 +1066,11 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
   // ===========================================================================
   describe('11. Fulfillment & Operational SLA Execution', () => {
     it('78. generates and persists courier waybill tracking code', async () => {
+      ensureTestMandate('res_fulfill_78');
       const wf = await orchestrator.startWorkflow({
         requestText: '5 Dairy Milk',
         location: { latitude: 18.5204, longitude: 73.8567 },
+        residentReference: 'res_fulfill_78',
       });
 
       expect(wf.entities.deliveryTrackingCodes.length).toBeGreaterThan(0);
@@ -1043,9 +1078,11 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
     });
 
     it('79. verifies delivery milestone events were ingested during fulfillment', async () => {
+      ensureTestMandate('res_fulfill_79');
       const wf = await orchestrator.startWorkflow({
         requestText: '5 Dairy Milk',
         location: { latitude: 18.5204, longitude: 73.8567 },
+        residentReference: 'res_fulfill_79',
       });
 
       const fulfillmentOrder = (wf as any)._fulfillmentOrder;
@@ -1054,9 +1091,11 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
     });
 
     it('80. records simulated delivery confirmation evidence', async () => {
+      ensureTestMandate('res_fulfill_80');
       const wf = await orchestrator.startWorkflow({
         requestText: '5 Dairy Milk',
         location: { latitude: 18.5204, longitude: 73.8567 },
+        residentReference: 'res_fulfill_80',
       });
 
       const fulfillmentOrder = (wf as any)._fulfillmentOrder;
@@ -1079,9 +1118,11 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
     });
 
     it('83. fulfillment order correctly references purchase order and commitment', async () => {
+      ensureTestMandate('res_fulfill_83');
       const wf = await orchestrator.startWorkflow({
         requestText: '5 Dairy Milk',
         location: { latitude: 18.5204, longitude: 73.8567 },
+        residentReference: 'res_fulfill_83',
       });
 
       const fulfillmentOrder = (wf as any)._fulfillmentOrder;
@@ -1095,9 +1136,11 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
   // ===========================================================================
   describe('12. Resident Allocation & 4-Pillar Reconciliation', () => {
     it('84. conserves quantity: allocated quantity exactly equals verified delivered quantity', async () => {
+      ensureTestMandate('res_alloc_84');
       const wf = await orchestrator.startWorkflow({
         requestText: '5 Dairy Milk',
         location: { latitude: 18.5204, longitude: 73.8567 },
+        residentReference: 'res_alloc_84',
       });
 
       const allocSummary = (wf as any)._allocationSummary;
@@ -1106,9 +1149,11 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
     });
 
     it('85. conserves monetary total: resident allocated amount matches procurement cost', async () => {
+      ensureTestMandate('res_alloc_85');
       const wf = await orchestrator.startWorkflow({
         requestText: '5 Dairy Milk',
         location: { latitude: 18.5204, longitude: 73.8567 },
+        residentReference: 'res_alloc_85',
       });
 
       const allocSummary = (wf as any)._allocationSummary;
@@ -1116,9 +1161,11 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
     });
 
     it('86. achieves RECONCILED reconciliation status with 0 unresolved discrepancies', async () => {
+      ensureTestMandate('res_alloc_86');
       const wf = await orchestrator.startWorkflow({
         requestText: '5 Dairy Milk',
         location: { latitude: 18.5204, longitude: 73.8567 },
+        residentReference: 'res_alloc_86',
       });
 
       const reconResult = (wf as any)._reconciliationResult;
@@ -1128,9 +1175,11 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
     });
 
     it('87. prevents competitor pricing leakage in resident allocation summary', async () => {
+      ensureTestMandate('res_alloc_87');
       const wf = await orchestrator.startWorkflow({
         requestText: '5 Dairy Milk',
         location: { latitude: 18.5204, longitude: 73.8567 },
+        residentReference: 'res_alloc_87',
       });
 
       const allocSummary = (wf as any)._allocationSummary;
@@ -1140,9 +1189,11 @@ describe('Phase 10: Complete Autonomous Relay Loop & Orchestration Lifecycle', (
     });
 
     it('88. allocates resident demands for multiple quantity items accurately', async () => {
+      ensureTestMandate('res_alloc_88');
       const wf = await orchestrator.startWorkflow({
         requestText: '10 notebooks',
         location: { latitude: 18.5204, longitude: 73.8567 },
+        residentReference: 'res_alloc_88',
       });
 
       const allocSummary = (wf as any)._allocationSummary;

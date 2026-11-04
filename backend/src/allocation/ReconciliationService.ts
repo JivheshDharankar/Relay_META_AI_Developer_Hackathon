@@ -156,47 +156,66 @@ export class ReconciliationService {
         lineVerifiedQuantity = totalVerifiedFulfilled;
       } else {
         // Multi-item request:
-        // 1. Check if any fulfillments explicitly match by productId or productName & unit
-        const matchingFulfillments = verifiedFulfillments.filter(
-          (f) =>
-            (f.productName.toLowerCase() === group.productName.toLowerCase() && f.unit === group.unit) ||
-            (f.productName.toLowerCase().includes(group.productName.toLowerCase()) && f.unit === group.unit)
+        // 1. Check fulfillment order lines directly if present
+        const fulfillmentLines = verifiedFulfillments.flatMap((f) => f.lines || []);
+        const matchingFulfillmentLine = fulfillmentLines.find(
+          (fl) =>
+            (fl.productId && group.productId && fl.productId === group.productId) ||
+            fl.productName.toLowerCase() === group.productName.toLowerCase() ||
+            fl.productName.toLowerCase().includes(group.productName.toLowerCase()) ||
+            group.productName.toLowerCase().includes(fl.productName.toLowerCase())
         );
 
-        if (matchingFulfillments.length > 0 && matchingFulfillments.length < verifiedFulfillments.length) {
-          lineVerifiedQuantity = matchingFulfillments.reduce((sum, f) => sum + f.fulfilledQuantity, 0);
-        } else if (purchaseOrders && purchaseOrders.length > 0) {
-          // If a single fulfillment order was issued for the batch PO:
-          // Check if PO lines correspond to this group
-          const poLines = purchaseOrders.flatMap((po) => po.lines);
-          const matchingPoLine = poLines.find(
-            (l) =>
-              l.productName.toLowerCase() === group.productName.toLowerCase() ||
-              l.productName.toLowerCase().includes(group.productName.toLowerCase()) ||
-              group.productName.toLowerCase().includes(l.productName.toLowerCase())
+        if (matchingFulfillmentLine) {
+          lineVerifiedQuantity = matchingFulfillmentLine.fulfilledQuantity;
+        } else {
+          // 2. Check if any fulfillments explicitly match by productId or productName & unit
+          const matchingFulfillments = verifiedFulfillments.filter(
+            (f) =>
+              (f.productName.toLowerCase() === group.productName.toLowerCase() && f.unit === group.unit) ||
+              (f.productName.toLowerCase().includes(group.productName.toLowerCase()) && f.unit === group.unit)
           );
 
-          if (matchingPoLine) {
-            // If the overall fulfillment was complete, this line received its full quantity
-            if (totalVerifiedFulfilled === totalAllocatedQuantity) {
-              lineVerifiedQuantity = matchingPoLine.quantity;
-            } else if (totalAllocatedQuantity > 0) {
-              // Proportional fulfillment if partial
-              lineVerifiedQuantity = roundQuantity(
-                matchingPoLine.quantity * (totalVerifiedFulfilled / totalAllocatedQuantity)
-              ).toNumber();
+          if (matchingFulfillments.length > 0 && matchingFulfillments.length < verifiedFulfillments.length) {
+            lineVerifiedQuantity = matchingFulfillments.reduce((sum, f) => sum + f.fulfilledQuantity, 0);
+          } else if (purchaseOrders && purchaseOrders.length > 0) {
+            // Check if PO lines correspond to this group
+            const poLines = purchaseOrders.flatMap((po) => po.lines);
+            const matchingPoLine = poLines.find(
+              (l) =>
+                l.productName.toLowerCase() === group.productName.toLowerCase() ||
+                l.productName.toLowerCase().includes(group.productName.toLowerCase()) ||
+                group.productName.toLowerCase().includes(l.productName.toLowerCase())
+            );
+
+            if (matchingPoLine) {
+              if (verifiedFulfillments.length > 0 && verifiedFulfillments.every((f) => f.status === 'VERIFIED')) {
+                lineVerifiedQuantity = matchingPoLine.quantity;
+              }
             }
           } else {
-            lineVerifiedQuantity = group.allocatedQuantity;
-          }
-        } else {
-          // Fallback if no PO lines: if total verified equals total allocated, each line is matched
-          if (totalVerifiedFulfilled === totalAllocatedQuantity) {
-            lineVerifiedQuantity = group.allocatedQuantity;
-          } else if (totalAllocatedQuantity > 0) {
-            lineVerifiedQuantity = roundQuantity(
-              group.allocatedQuantity * (totalVerifiedFulfilled / totalAllocatedQuantity)
-            ).toNumber();
+            // Check commitment items or lineItems if fulfillments don't carry individual lines
+            const cItems = (commitment as any).items || commitment.lineItems;
+            if (cItems && Array.isArray(cItems)) {
+              const matchingCItem = cItems.find(
+                (ci: any) =>
+                  (ci.productId && group.productId && ci.productId === group.productId) ||
+                  ci.productName.toLowerCase() === group.productName.toLowerCase() ||
+                  ci.productName.toLowerCase().includes(group.productName.toLowerCase()) ||
+                  group.productName.toLowerCase().includes(ci.productName.toLowerCase())
+              );
+              if (
+                matchingCItem &&
+                verifiedFulfillments.length > 0 &&
+                verifiedFulfillments.every((f) => f.status === 'VERIFIED')
+              ) {
+                lineVerifiedQuantity =
+                  matchingCItem.committedQuantity ??
+                  matchingCItem.requestedQuantity ??
+                  matchingCItem.quantity ??
+                  group.allocatedQuantity;
+              }
+            }
           }
         }
       }
@@ -217,9 +236,10 @@ export class ReconciliationService {
       });
     }
 
-    const isQuantityMatched =
-      isDecimalEqual(toDecimal(totalAllocatedQuantity), toDecimal(totalVerifiedFulfilled)) &&
-      lineBreakdowns.every((l) => l.isMatched);
+    const isQuantityMatched = isMultiItem
+      ? lineBreakdowns.length > 0 && lineBreakdowns.every((l) => l.isMatched)
+      : isDecimalEqual(toDecimal(totalAllocatedQuantity), toDecimal(totalVerifiedFulfilled)) &&
+        lineBreakdowns.every((l) => l.isMatched);
 
     let reconciliationReason: string | undefined;
     if (isMultiItem) {

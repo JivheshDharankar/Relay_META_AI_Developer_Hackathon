@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { useParams } from 'next/navigation';
-import { Handshake, CircleDashed, ArrowDown } from 'lucide-react';
+import { Handshake, CircleDashed, ArrowDown, ShieldCheck } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/Card';
 import { EmptyState } from '@/components/feedback/Feedback';
 import { StageDetailShell } from '@/components/runs/StageDetailShell';
@@ -85,6 +85,19 @@ export default function NegotiationStagePage() {
                 </ol>
               </CardContent>
             </Card>
+
+            <Card>
+              <CardContent className="pt-5">
+                <div className="flex items-start gap-3">
+                  <ShieldCheck className="h-4 w-4 text-relay-primary-600 shrink-0 mt-0.5" aria-hidden />
+                  <div className="text-xs text-relay-ink-600 leading-relaxed">
+                    <p className="font-semibold text-relay-ink-900 mb-0.5">Supplier Quote Negotiation vs Final Selection</p>
+                    Negotiation targets and reduces specific supplier quotes. Stage 06 (Selection) then evaluates all supplier quotes (both negotiated offers and lowest baseline bids) to deterministically select the lowest total procurement cost.
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
             <p className="text-xs text-relay-ink-500 leading-relaxed">
               Negotiation is bounded by backend round limits and every improved term is
               re-validated financially before it can become a candidate.

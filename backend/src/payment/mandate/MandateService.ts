@@ -237,6 +237,22 @@ export class MandateService {
     mandate.updatedAt = new Date();
   }
 
+  /**
+   * Credits a refunded amount back to the mandate: spent decreases so the
+   * resident's cumulative capacity is restored exactly once per refund.
+   */
+  public refundSpending(id: string, amount: number): void {
+    const mandate = this.mandates.get(id);
+    if (!mandate) return;
+
+    const currentSpent = toDecimal(mandate.spentAmount);
+    const amt = toDecimal(amount);
+    const newSpent = roundMoney(subtractDecimals(currentSpent, amt));
+
+    mandate.spentAmount = Math.max(0, newSpent.toNumber());
+    mandate.updatedAt = new Date();
+  }
+
   public reset(): void {
     this.mandates.clear();
     this.reservationLocks.clear();

@@ -36,40 +36,7 @@ interface IntentMatch {
  * Supports catalog items: Rice, Wheat, Cooking Oil, Detergent, Cleaning Liquid.
  * Flags unsupported items (e.g. Sugar) cleanly without faking AI.
  */
-/**
- * Generic honesty check: finds quantity-led segments ("3 icecream",
- * "500 g ginger") whose product phrase matches NO catalog entry. Uses the
- * deterministic catalog matcher — no product-specific logic. Lets the mock
- * fail closed on mixed mappable+unmappable requests exactly like the real
- * model path (which emits every item, leaving unknowns unresolved).
- */
-const QUANTITY_SEGMENT_RE =
-  /(\d+(?:\.\d+)?)\s*(kg|kilos?|kilograms?|grams?|gms?|g|litres?|liters?|l|ml|packs?|units?|pieces?)?\s*(?:of\s+)?([a-z][a-z\s]{0,28}?)(?=\s*(?:,|\+|\band\b|\bwithin\b|\bfor\b|\bwith\b|\.|$))/gi;
 const TIME_WORDS = new Set(['hour', 'hours', 'hr', 'hrs', 'day', 'days', 'minute', 'minutes']);
-
-function depluralize(phrase: string): string {
-  return phrase
-    .split(/\s+/)
-    .map((w) => (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w))
-    .join(' ');
-}
-
-function findUnmappedSegment(text: string): string | null {
-  QUANTITY_SEGMENT_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = QUANTITY_SEGMENT_RE.exec(text)) !== null) {
-    // Skip monetary amounts ("₹5000 budget") — not product segments.
-    if (m.index > 0 && text[m.index - 1] === '₹') continue;
-    const phrase = m[3].trim().replace(/\s+/g, ' ');
-    // Time budgets ("12 hours", "12 hours under community mandate") are
-    // deadlines, not products — skipped by leading time word.
-    if (!phrase || TIME_WORDS.has(phrase.split(' ')[0])) continue;
-    if (matchCatalogProduct(phrase) || matchCatalogProduct(depluralize(phrase))) continue;
-    const excerpt = `${m[1]}${m[2] ? ` ${m[2]}` : ''} ${phrase}`;
-    return excerpt;
-  }
-  return null;
-}
 
 /**
  * Generic open-world segment parsing for the 14.2 extraction tool path.
@@ -293,222 +260,73 @@ function parseGenericSegments(text: string): GenericSegment[] {
   return segments;
 }
 
+/**
+ * Deterministic catalog intent parser for the mock provider.
+ *
+ * Product-agnostic by construction: generic quantity-led segments are
+ * resolved through the shared catalog matcher, so every requested product
+ * is preserved with its stated quantity and unit. Nothing is invented —
+ * an unknown product, a missing quantity, or an unknown unit fails the
+ * whole request closed instead of silently dropping or defaulting an item.
+ */
 function parseUserIntent(prompt: string): { matches: IntentMatch[]; unsupportedItem?: string } {
-  const text = prompt.toLowerCase();
-
+  const normalized = normalizeIndicNumberWords(normalizeDevanagariNumerals(prompt));
+  const segments = parseGenericSegments(normalized);
   const matches: IntentMatch[] = [];
 
-  // 1. Rice match (skipped when Ambemohar is present — branch 14 owns it)
-  if (
-    (text.includes('rice') || text.includes('basmati') || text.includes('chawal')) &&
-    !text.includes('ambemohar') &&
-    !text.includes('ambemohor')
-  ) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?|packs?|units?)?\s*(?:of\s+)?(?:basmati\s+)?rice/i) ||
-                     text.match(/rice[^\d]*(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?/i) ||
-                     text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 10.0;
-    matches.push({
-      productId: SEED_IDS.products.rice,
-      quantity: qty,
-      unit: 'KG',
-      productName: 'Basmati Rice (Extra Long Grain)',
-    });
-  }
-
-  // 2. Wheat match
-  if (text.includes('wheat') || text.includes('atta') || text.includes('flour') || text.includes('sharbati')) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?|packs?|units?)?\s*(?:of\s+)?(?:sharbati\s+)?(?:whole\s+)?(?:wheat|atta)/i) ||
-                     text.match(/(?:wheat|atta)[^\d]*(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?/i) ||
-                     text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 20.0;
-    matches.push({
-      productId: SEED_IDS.products.wheat,
-      quantity: qty,
-      unit: 'KG',
-      productName: 'Sharbati Whole Wheat Atta',
-    });
-  }
-
-  // 3. Oil match
-  if (/\boil\b/i.test(text) || /\bsunflower\b/i.test(text) || /\btel\b/i.test(text)) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:l|litres?|liters?)?\s*(?:of\s+)?(?:sunflower\s+)?(?:cooking\s+)?oil/i) ||
-                     text.match(/oil[^\d]*(\d+(?:\.\d+)?)\s*(?:l|litres?|liters?)?/i) ||
-                     text.match(/(\d+(?:\.\d+)?)\s*(?:l|litres?|liters?)/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 5.0;
-    matches.push({
-      productId: SEED_IDS.products.cookingOil,
-      quantity: qty,
-      unit: 'LITRE',
-      productName: 'Cold-Pressed Sunflower Cooking Oil',
-    });
-  }
-
-  // 4. Detergent match
-  if (text.includes('detergent') || text.includes('washing powder') || text.includes('laundry')) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?|packs?|units?)?\s*(?:of\s+)?(?:eco\s+)?(?:clean\s+)?(?:laundry\s+)?(?:detergent|washing powder)/i) ||
-                     text.match(/(?:detergent|washing powder|laundry)[^\d]*(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?/i) ||
-                     text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 5.0;
-    matches.push({
-      productId: SEED_IDS.products.detergent,
-      quantity: qty,
-      unit: 'KG',
-      productName: 'Eco Clean Laundry Detergent Powder',
-    });
-  }
-
-  // 5. Sugar match
-  if (text.includes('sugar') || text.includes('cheeni') || text.includes('sakhar')) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?|packs?|units?)?\s*(?:of\s+)?(?:organic\s+)?(?:refined\s+)?(?:cane\s+)?(?:sugar|cheeni|sakhar)/i) ||
-                     text.match(/(?:sugar|cheeni|sakhar)[^\d]*(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?/i) ||
-                     text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 2.0;
-    matches.push({
-      productId: SEED_IDS.products.sugar,
-      quantity: qty,
-      unit: 'KG',
-      productName: 'Organic Refined Cane Sugar',
-    });
-  }
-
-  // 6. Groundnut match
-  if (text.includes('groundnut') || text.includes('peanut') || text.includes('moongphali') || text.includes('shengdana')) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?|packs?|units?)?\s*(?:of\s+)?(?:raw\s+)?(?:premium\s+)?(?:groundnut|peanut|moongphali|shengdana)/i) ||
-                     text.match(/(?:groundnut|peanut|moongphali|shengdana)[^\d]*(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?/i) ||
-                     text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 2.0;
-    matches.push({
-      productId: SEED_IDS.products.groundnut,
-      quantity: qty,
-      unit: 'KG',
-      productName: 'Raw Premium Groundnut (Peanuts)',
-    });
-  }
-
-  // 7. Toothbrush match
-  if (text.includes('toothbrush') || text.includes('toothbrushes') || text.includes('brush')) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:units?|packs?|pieces?|toothbrushes?|brushes?)?\s*(?:of\s+)?(?:soft\s+)?(?:bristle\s+)?(?:bamboo\s+)?(?:toothbrush|toothbrushes|brush)/i) ||
-                     text.match(/(?:toothbrush|toothbrushes|brush)[^\d]*(\d+(?:\.\d+)?)/i) ||
-                     text.match(/(\d+(?:\.\d+)?)\s*(?:units?|packs?|pieces?|toothbrushes?)?/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 2.0;
-    matches.push({
-      productId: SEED_IDS.products.toothbrushes,
-      quantity: qty,
-      unit: 'UNIT',
-      productName: 'Soft Bristle Bamboo Toothbrushes (Pack of 2)',
-    });
-  }
-
-  // 8. Banana match (count-based fresh produce; word boundaries avoid 'plantain'-style collisions)
-  if (/\bbananas?\b/i.test(text) || /\bkela\b/i.test(text)) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:units?|pieces?|dozen)?\s*(?:of\s+)?(?:fresh\s+)?(?:robusta\s+)?(?:banana|bananas|kela)/i) ||
-                     text.match(/(?:banana|bananas|kela)[^\d]*(\d+(?:\.\d+)?)/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 6;
-    matches.push({
-      productId: SEED_IDS.products.bananas,
-      quantity: qty,
-      unit: 'UNIT',
-      productName: 'Fresh Robusta Bananas',
-    });
-  }
-
-  // 9. Orange match (count-based fresh produce)
-  if (/\boranges?\b/i.test(text) || /\bsantra\b/i.test(text)) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:units?|pieces?|dozen)?\s*(?:of\s+)?(?:nagpur\s+)?(?:mandarin\s+)?(?:orange|oranges|santra)/i) ||
-                     text.match(/(?:orange|oranges|santra)[^\d]*(\d+(?:\.\d+)?)/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 12;
-    matches.push({
-      productId: SEED_IDS.products.oranges,
-      quantity: qty,
-      unit: 'UNIT',
-      productName: 'Nagpur Mandarin Oranges',
-    });
-  }
-
-  // 10. Apple match (weight-based fresh produce)
-  if (/\bapples?\b/i.test(text) || /\bseb\b/i.test(text)) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?|units?|pieces?)?\s*(?:of\s+)?(?:kashmiri\s+)?(?:red\s+)?(?:apple|apples|seb)/i) ||
-                     text.match(/(?:apple|apples|seb)[^\d]*(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 1.0;
-    matches.push({
-      productId: SEED_IDS.products.apple,
-      quantity: qty,
-      unit: 'KG',
-      productName: 'Kashmiri Red Apples',
-    });
-  }
-
-  // 11. Bajra match (weight-based millet)
-  if (/\bbajra\b/i.test(text) || /\bpearl\s+millet\b/i.test(text)) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?\s*(?:of\s+)?(?:pearl\s+millet\s+)?bajra/i) ||
-                     text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?\s*(?:of\s+)?pearl\s+millet/i) ||
-                     text.match(/(?:bajra|pearl\s+millet)[^\d]*(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 2.0;
-    matches.push({
-      productId: SEED_IDS.products.bajra,
-      quantity: qty,
-      unit: 'KG',
-      productName: 'Pearl Millet Bajra Grain',
-    });
-  }
-
-  // 12. Dark chocolate match (weight-based confectionery)
-  if (/\bdark\s+chocolate\b/i.test(text) || /\bchocolate\b/i.test(text)) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?\s*(?:of\s+)?(?:dark\s+)?(?:baking\s+)?chocolate/i) ||
-                     text.match(/(?:dark\s+)?chocolate[^\d]*(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 2.0;
-    matches.push({
-      productId: SEED_IDS.products.darkChocolate,
-      quantity: qty,
-      unit: 'KG',
-      productName: 'Dark Chocolate Baking Bar 70%',
-    });
-  }
-
-  // 13. Maida match (weight-based flour)
-  if (/\bmaida\b/i.test(text)) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?\s*(?:of\s+)?maida/i) ||
-                     text.match(/maida[^\d]*(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 2.0;
-    matches.push({
-      productId: SEED_IDS.products.maida,
-      quantity: qty,
-      unit: 'KG',
-      productName: 'Refined Wheat Flour (Maida)',
-    });
-  }
-
-  // 14. Ambemohar rice match (weight-based aromatic rice; branch 1 yields to it)
-  if (/\bambemohar\b/i.test(text) || /\bambemohor\b/i.test(text)) {
-    const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?\s*(?:of\s+)?ambemohar(?:\s+rice)?/i) ||
-                     text.match(/ambemohar[^\d]*(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kilograms?)?/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 25.0;
-    matches.push({
-      productId: SEED_IDS.products.ambemoharRice,
-      quantity: qty,
-      unit: 'KG',
-      productName: 'Ambemohar Aromatic Rice',
-    });
-  }
-
-  // No keyword matched: the request is unmappable. NEVER substitute a
-  // default product — return the original command for an honest stop.
-  if (matches.length === 0) {
+  if (segments.length === 0) {
     const excerpt = prompt.trim().replace(/\s+/g, ' ').slice(0, 120);
     return { matches, unsupportedItem: excerpt.length > 0 ? excerpt : 'this request' };
   }
 
-  // Mixed request honesty: known products matched, but an unconsumed
-  // quantity-led segment names something outside the catalog. Fail the
-  // WHOLE request closed — never silently procure only the known part.
-  const unmapped = findUnmappedSegment(text);
-  if (unmapped) {
-    return { matches, unsupportedItem: unmapped };
+  for (const segment of segments) {
+    const excerpt = segment.quantity !== undefined
+      ? `${segment.quantity}${segment.unit ? ` ${segment.unit}` : ''} ${segment.productName}`.trim()
+      : segment.productName;
+    // Catalog keywords are singular; a plural mention ("raw groundnuts")
+    // retries with singularized words before failing closed.
+    const singularized = segment.productName
+      .split(/\s+/)
+      .map((w) => (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w))
+      .join(' ');
+    const catalog =
+      matchCatalogProduct(segment.productName) ??
+      (singularized !== segment.productName ? matchCatalogProduct(singularized) : null);
+    if (!catalog) {
+      return { matches, unsupportedItem: excerpt };
+    }
+    if (segment.quantity === undefined || !(segment.quantity > 0)) {
+      return { matches, unsupportedItem: excerpt };
+    }
+    let unit: IntentMatch['unit'];
+    if (segment.unit) {
+      const canonical = normalizeIntentUnit(segment.unit);
+      if (!canonical) {
+        return { matches, unsupportedItem: excerpt };
+      }
+      unit = canonical;
+    } else {
+      unit = catalog.unit;
+    }
+    const existing = matches.find((m) => m.productId === catalog.productId && m.unit === unit);
+    if (existing) {
+      existing.quantity += segment.quantity;
+    } else {
+      matches.push({
+        productId: catalog.productId,
+        quantity: segment.quantity,
+        unit,
+        productName: catalog.canonicalName,
+      });
+    }
   }
 
   return { matches };
 }
+
+
+
+
 
 /**
  * Phase 14.2 deterministic deadline parsing for intent-extraction mode.
@@ -548,10 +366,11 @@ export class MockModelProvider implements ModelProvider {
   public readonly providerName = 'mock';
   private scriptedSequence: ScriptedStep[] = [];
   private currentStepIndex = 0;
-  private lastCreatedOrderId?: string;
-  private lastCommunityOrderId?: string;
   private activeIntent?: IntentMatch;
-  private lastRequestedPrice?: number;
+  private activeIntents: IntentMatch[] = [];
+  private createdOrders: Array<{ intent: IntentMatch; orderId: string; totalPrice: number }> = [];
+  private selections: Array<{ intent: IntentMatch; supplierId: string; totalPrice: number }> = [];
+  private communityOrderIds: string[] = [];
 
   constructor(customSequence?: ScriptedStep[]) {
     if (customSequence) {
@@ -569,10 +388,11 @@ export class MockModelProvider implements ModelProvider {
 
   public reset(): void {
     this.currentStepIndex = 0;
-    this.lastCreatedOrderId = undefined;
-    this.lastCommunityOrderId = undefined;
     this.activeIntent = undefined;
-    this.lastRequestedPrice = undefined;
+    this.activeIntents = [];
+    this.createdOrders = [];
+    this.selections = [];
+    this.communityOrderIds = [];
   }
 
   public async generate(_request: ModelRequest): Promise<ModelResponse> {
@@ -1418,32 +1238,37 @@ export class MockModelProvider implements ModelProvider {
       const intent = parseUserIntent(lastMessage.content || '');
 
       if (intent.unsupportedItem) {
+        const original = (lastMessage.content || '').trim().replace(/\s+/g, ' ');
         return {
           content:
             `I need a little more information — I understood you want something procured ("${intent.unsupportedItem}"), ` +
             `but I could not identify the exact product or quantity yet. ` +
-            `Please restate the request with product, quantity, and unit.`,
+            `Please restate the request with product, quantity, and unit. (Original request: "${original}")`,
           finishReason: 'stop',
           raw: { code: 'UNMAPPABLE_PRODUCT' },
         };
       }
 
-      const primary = intent.matches[0];
-      this.activeIntent = primary;
+      // Preserve EVERY matched product: one createRequest per item, each
+      // with its own catalog ID, quantity and unit. Nothing is truncated
+      // to the first match and no product is substituted.
+      this.activeIntents = intent.matches;
+      this.activeIntent = intent.matches[0];
+      const itemList = intent.matches
+        .map((m) => `${m.quantity} ${m.unit} ${m.productName}`)
+        .join(', ');
 
       return {
-        content: `Analyzing resident request. Initiating procurement request creation for ${primary.quantity} ${primary.unit} ${primary.productName}...`,
-        toolCalls: [
-          {
-            id: 'call_create_req_01',
-            name: 'createRequest',
-            arguments: {
-              productId: primary.productId,
-              quantity: primary.quantity,
-              unit: primary.unit,
-            },
+        content: `Analyzing resident request. Initiating procurement request creation for ${itemList}...`,
+        toolCalls: intent.matches.map((m, i) => ({
+          id: `call_create_req_01_${i}`,
+          name: 'createRequest',
+          arguments: {
+            productId: m.productId,
+            quantity: m.quantity,
+            unit: m.unit,
           },
-        ],
+        })),
         finishReason: 'tool_calls',
       };
     }
@@ -1453,21 +1278,83 @@ export class MockModelProvider implements ModelProvider {
       const toolResult = this.parseToolResult(lastMessage.content);
       const toolName = lastMessage.name;
 
-      if (toolName === 'createRequest') {
-        const orderId = toolResult?.orderId || 'res_order_001';
-        this.lastCreatedOrderId = orderId;
-        const requestedPrice = Number(toolResult?.totalPrice || toolResult?.totalAmount || 825.0);
-        this.lastRequestedPrice = requestedPrice;
-        const prodName = toolResult?.productName || this.activeIntent?.productName || 'Bulk Goods';
+      // Fail fast: a failed tool result halts the chain. Downstream tools
+      // must never run on fabricated or stale upstream outputs.
+      if (toolResult && (toolResult.success === false || toolResult.error)) {
+        const err = (toolResult.error ?? {}) as Record<string, unknown>;
+        const reasonText =
+          typeof toolResult.reason === 'string' && toolResult.reason.length > 0
+            ? toolResult.reason
+            : undefined;
+        const message =
+          typeof err.message === 'string' && err.message.length > 0
+            ? err.message
+            : (reasonText ?? 'Tool reported failure');
+        const reasonCode = reasonText?.match(/^[A-Z][A-Z_]+/)?.[0];
+        const code =
+          typeof err.code === 'string' && err.code.length > 0
+            ? err.code
+            : (reasonCode ?? 'TOOL_EXECUTION_FAILED');
         return {
-          content: `Request validated (Order: ${orderId}). Verifying pre-authorized spending mandate...`,
+          content:
+            `Relay could not complete this procurement run. Backend step '${toolName}' failed: ${message} ` +
+            `No further steps were executed and no order was secured on the basis of this failure.`,
+          finishReason: 'stop',
+          raw: { code },
+        };
+      }
+
+      if (toolName === 'createRequest') {
+        const allResults = this.toolResults(request.messages, 'createRequest');
+        const intents = this.activeIntents.length > 0
+          ? this.activeIntents
+          : this.activeIntent
+            ? [this.activeIntent]
+            : [];
+        if (intents.length === 0) {
+          throw new Error('MockModelProvider: tool follow-up without a mapped intent; refusing to substitute a product.');
+        }
+        // Defensive: emit any createRequest calls not yet answered.
+        if (allResults.length < intents.length) {
+          const remaining = intents.slice(allResults.length);
+          return {
+            content: 'Creating remaining procurement requests...',
+            toolCalls: remaining.map((m, i) => ({
+              id: `call_create_req_01_${allResults.length + i}`,
+              name: 'createRequest',
+              arguments: { productId: m.productId, quantity: m.quantity, unit: m.unit },
+            })),
+            finishReason: 'tool_calls',
+          };
+        }
+        const created: Array<{ intent: IntentMatch; orderId: string; totalPrice: number }> = [];
+        for (let i = 0; i < intents.length; i++) {
+          const r = allResults[i] as Record<string, any>;
+          const orderId = r?.orderId;
+          const totalPrice = Number(r?.totalPrice ?? r?.totalAmount);
+          if (typeof orderId !== 'string' || orderId.length === 0 || !Number.isFinite(totalPrice)) {
+            return {
+              content:
+                `Relay could not complete this procurement run. Backend step 'createRequest' did not return a persisted order ID and total for '${intents[i].productName}'. ` +
+                `No order was secured and no downstream step was executed.`,
+              finishReason: 'stop',
+              raw: { code: 'MISSING_ORDER_EVIDENCE' },
+            };
+          }
+          created.push({ intent: intents[i], orderId, totalPrice });
+        }
+        this.createdOrders = created;
+        const requestedPrice = created.reduce((sum, c) => sum + c.totalPrice, 0);
+        const prodNames = created.map((c) => c.intent.productName).join(', ');
+        return {
+          content: `Requests validated (${created.map((c) => c.orderId).join(', ')}). Verifying pre-authorized spending mandate...`,
           toolCalls: [
             {
               id: 'call_check_auth_02',
               name: 'checkAuthorization',
               arguments: {
                 requestedAmount: requestedPrice,
-                purpose: `Community Procurement: ${prodName}`,
+                purpose: `Community Procurement: ${prodNames}`,
               },
             },
           ],
@@ -1490,15 +1377,16 @@ export class MockModelProvider implements ModelProvider {
       }
 
       if (toolName === 'aggregateDemand') {
-        const activeItem = this.activeIntent;
-        if (!activeItem) {
+        const intents = this.currentIntents();
+        if (intents.length === 0) {
           throw new Error('MockModelProvider: tool follow-up without a mapped intent; refusing to substitute a product.');
         }
+        const activeItem = intents[0];
         return {
           content: 'Demand pooled across society units. Discovering compliant suppliers within 12h SLA...',
           toolCalls: [
             {
-              id: 'call_disc_suppliers_04',
+              id: 'call_disc_suppliers_04_0',
               name: 'discoverSuppliers',
               arguments: {
                 productId: activeItem.productId,
@@ -1512,15 +1400,17 @@ export class MockModelProvider implements ModelProvider {
       }
 
       if (toolName === 'discoverSuppliers') {
-        const activeItem = this.activeIntent;
-        if (!activeItem) {
+        const intents = this.currentIntents();
+        if (intents.length === 0) {
           throw new Error('MockModelProvider: tool follow-up without a mapped intent; refusing to substitute a product.');
         }
+        const idx = Math.min(this.toolResults(request.messages, 'discoverSuppliers').length - 1, intents.length - 1);
+        const activeItem = intents[Math.max(0, idx)];
         return {
           content: 'Suppliers discovered and filtered against hard constraints. Requesting and evaluating quotes...',
           toolCalls: [
             {
-              id: 'call_eval_offers_05',
+              id: `call_eval_offers_05_${Math.max(0, idx)}`,
               name: 'evaluateOffers',
               arguments: {
                 productId: activeItem.productId,
@@ -1533,15 +1423,17 @@ export class MockModelProvider implements ModelProvider {
       }
 
       if (toolName === 'evaluateOffers') {
-        const activeItem = this.activeIntent;
-        if (!activeItem) {
+        const intents = this.currentIntents();
+        if (intents.length === 0) {
           throw new Error('MockModelProvider: tool follow-up without a mapped intent; refusing to substitute a product.');
         }
+        const idx = Math.min(this.toolResults(request.messages, 'evaluateOffers').length - 1, intents.length - 1);
+        const activeItem = intents[Math.max(0, idx)];
         return {
           content: 'Offers ranked using multi-factor economics and SLA speed. Selecting optimal compliant offer...',
           toolCalls: [
             {
-              id: 'call_select_offer_06',
+              id: `call_select_offer_06_${Math.max(0, idx)}`,
               name: 'selectOffer',
               arguments: {
                 productId: activeItem.productId,
@@ -1554,68 +1446,100 @@ export class MockModelProvider implements ModelProvider {
       }
 
       if (toolName === 'selectOffer') {
-        const winningSupplierId = toolResult?.supplierId || '33333333-3333-4333-8333-333333333301';
-        const deadline = new Date(Date.now() + 6 * 3600 * 1000).toISOString();
-        const contributingResidentOrderIds = this.lastCreatedOrderId
-          ? [this.lastCreatedOrderId]
-          : undefined;
-
-        const activeItem = this.activeIntent;
-        if (!activeItem) {
+        const intents = this.currentIntents();
+        if (intents.length === 0) {
           throw new Error('MockModelProvider: tool follow-up without a mapped intent; refusing to substitute a product.');
         }
-        const winningTotal = Number(toolResult?.totalPrice || this.lastRequestedPrice || 825.0);
-        const unitPrice = (winningTotal / activeItem.quantity).toFixed(2);
-        this.lastRequestedPrice = winningTotal;
+        const idx = Math.min(this.toolResults(request.messages, 'selectOffer').length - 1, intents.length - 1);
+        const activeItem = intents[Math.max(0, idx)];
+        const winningSupplierId = toolResult?.supplierId;
+        if (typeof winningSupplierId !== 'string' || winningSupplierId.length === 0) {
+          return {
+            content:
+              `Relay could not complete this procurement run. Backend step 'selectOffer' returned no supplier for '${activeItem.productName}'. ` +
+              `No supplier was invented and no community order was created.`,
+            finishReason: 'stop',
+            raw: { code: 'MISSING_SUPPLIER_EVIDENCE' },
+          };
+        }
+        const createdForItem = this.createdOrders.find((c) => c.intent.productId === activeItem.productId);
+        const winningTotal = Number(toolResult?.totalPrice ?? createdForItem?.totalPrice);
+        if (!Number.isFinite(winningTotal)) {
+          return {
+            content:
+              `Relay could not complete this procurement run. No authoritative total price is available for '${activeItem.productName}'. ` +
+              `No price was invented and no community order was created.`,
+            finishReason: 'stop',
+            raw: { code: 'MISSING_PRICE_EVIDENCE' },
+          };
+        }
+        // Record this item's selection, replacing any prior entry for it.
+        this.selections = this.selections.filter((s) => s.intent.productId !== activeItem.productId);
+        this.selections.push({ intent: activeItem, supplierId: winningSupplierId, totalPrice: winningTotal });
 
-        return {
-          content: 'Offer selected. Atomically creating community procurement order...',
-          toolCalls: [
-            {
-              id: 'call_create_comm_order_07',
-              name: 'createCommunityOrder',
-              arguments: {
-                supplierId: winningSupplierId,
-                deliveryDeadline: deadline,
-                idempotencyKey: `IDEMP-AGENT-SCENARIO-${Date.now()}`,
-                contributingResidentOrderIds,
-                items: [
-                  {
-                    productId: activeItem.productId,
-                    totalQuantity: activeItem.quantity.toFixed(4),
-                    negotiatedUnitPrice: unitPrice,
-                  },
-                ],
+        // More items still need discovery/evaluation/selection.
+        if (Math.max(0, idx) + 1 < intents.length) {
+          const next = intents[Math.max(0, idx) + 1];
+          return {
+            content: `Offer selected for ${activeItem.productName}. Discovering suppliers for ${next.productName}...`,
+            toolCalls: [
+              {
+                id: `call_disc_suppliers_04_${Math.max(0, idx) + 1}`,
+                name: 'discoverSuppliers',
+                arguments: {
+                  productId: next.productId,
+                  requestedQuantity: next.quantity,
+                  maxSlaHours: 12.0,
+                },
               },
-            },
-          ],
-          finishReason: 'tool_calls',
-        };
+            ],
+            finishReason: 'tool_calls',
+          };
+        }
+
+        const groups = this.supplierGroups();
+        if (groups.length === 0) {
+          return {
+            content: 'Relay could not complete this procurement run. No supplier selection was recorded. No community order was created.',
+            finishReason: 'stop',
+            raw: { code: 'MISSING_SUPPLIER_EVIDENCE' },
+          };
+        }
+        return this.communityOrderCall(groups[0], 0);
       }
 
       if (toolName === 'createCommunityOrder') {
-        const communityOrderId = toolResult?.order?.id || 'comm_order_001';
-        const resOrderId = this.lastCreatedOrderId || '66666666-6666-4666-8666-666666666601';
-        this.lastCommunityOrderId = communityOrderId;
-        const activeItem = this.activeIntent;
-        if (!activeItem) {
-          throw new Error('MockModelProvider: tool follow-up without a mapped intent; refusing to substitute a product.');
+        const communityOrderId = toolResult?.order?.id ?? toolResult?.communityOrderId;
+        if (typeof communityOrderId !== 'string' || communityOrderId.length === 0) {
+          return {
+            content:
+              'Relay could not complete this procurement run. Backend step \'createCommunityOrder\' did not return a persisted community order ID. ' +
+              'No order ID was fabricated and no allocation, payment, or reconciliation was attempted.',
+            finishReason: 'stop',
+            raw: { code: 'MISSING_ORDER_EVIDENCE' },
+          };
         }
+        this.communityOrderIds.push(communityOrderId);
+        const groups = this.supplierGroups();
+        // More supplier groups still need their own community order.
+        if (this.communityOrderIds.length < groups.length) {
+          return this.communityOrderCall(groups[this.communityOrderIds.length], this.communityOrderIds.length);
+        }
+        const firstGroup = groups[0];
+        const firstCommunityOrderId = this.communityOrderIds[0];
         return {
           content: `Community order ${communityOrderId} confirmed. Allocating batch quantities to resident units...`,
           toolCalls: [
             {
-              id: 'call_allocate_08',
+              id: 'call_allocate_08_0',
               name: 'allocateResidentOrders',
               arguments: {
-                communityOrderId,
-                allocations: [
-                  {
-                    residentOrderId: resOrderId,
-                    productId: activeItem.productId,
-                    quantity: activeItem.quantity.toFixed(4),
-                  },
-                ],
+                communityOrderId: firstCommunityOrderId,
+                allocations: firstGroup.items.map((s) => ({
+                  residentOrderId: this.createdOrders.find((c) => c.intent.productId === s.intent.productId)?.orderId,
+                  productId: s.intent.productId,
+                  quantity: s.intent.quantity.toFixed(4),
+                })),
               },
             },
           ],
@@ -1624,8 +1548,31 @@ export class MockModelProvider implements ModelProvider {
       }
 
       if (toolName === 'allocateResidentOrders') {
-        const communityOrderId = toolResult?.communityOrderId || this.lastCommunityOrderId || 'comm_order_001';
-        const resOrderId = this.lastCreatedOrderId || '66666666-6666-4666-8666-666666666601';
+        const allocateCount = this.toolResults(request.messages, 'allocateResidentOrders').length;
+        const groups = this.supplierGroups();
+        // Allocate any remaining community orders before paying/reconciling.
+        if (allocateCount < this.communityOrderIds.length) {
+          const nextIdx = allocateCount;
+          const nextGroup = groups[nextIdx];
+          return {
+            content: 'Allocating the next community order to resident units...',
+            toolCalls: [
+              {
+                id: `call_allocate_08_${nextIdx}`,
+                name: 'allocateResidentOrders',
+                arguments: {
+                  communityOrderId: this.communityOrderIds[nextIdx],
+                  allocations: nextGroup.items.map((s) => ({
+                    residentOrderId: this.createdOrders.find((c) => c.intent.productId === s.intent.productId)?.orderId,
+                    productId: s.intent.productId,
+                    quantity: s.intent.quantity.toFixed(4),
+                  })),
+                },
+              },
+            ],
+            finishReason: 'tool_calls',
+          };
+        }
 
         const userMsg = request.messages.find((m) => m.role === 'user')?.content?.toLowerCase() || '';
         const isFullCycle =
@@ -1635,16 +1582,24 @@ export class MockModelProvider implements ModelProvider {
           userMsg.includes('e2e');
 
         if (isFullCycle) {
+          const first = this.createdOrders[0];
+          if (!first) {
+            return {
+              content: 'Relay could not complete this procurement run. No persisted resident order is available for payment. No payment was attempted.',
+              finishReason: 'stop',
+              raw: { code: 'MISSING_ORDER_EVIDENCE' },
+            };
+          }
           return {
             content: 'Unit allocation verified. Executing pre-authorized resident payment under verified mandate...',
             toolCalls: [
               {
-                id: 'call_req_payment_09',
+                id: 'call_req_payment_09_0',
                 name: 'requestPayment',
                 arguments: {
-                  residentOrderId: resOrderId,
-                  amount: this.lastRequestedPrice || 825.0,
-                  idempotencyKey: `IDEMP-PAY-${resOrderId}`,
+                  residentOrderId: first.orderId,
+                  amount: this.paymentAmountFor(first),
+                  idempotencyKey: `IDEMP-PAY-${first.orderId}`,
                 },
               },
             ],
@@ -1652,11 +1607,19 @@ export class MockModelProvider implements ModelProvider {
           };
         }
 
+        const communityOrderId = this.communityOrderIds[0];
+        if (!communityOrderId) {
+          return {
+            content: 'Relay could not complete this procurement run. No persisted community order is available for reconciliation. Reconciliation was not attempted.',
+            finishReason: 'stop',
+            raw: { code: 'MISSING_ORDER_EVIDENCE' },
+          };
+        }
         return {
           content: 'Unit allocation verified. Executing multi-dimensional financial & quantity reconciliation...',
           toolCalls: [
             {
-              id: 'call_reconcile_09',
+              id: 'call_reconcile_09_0',
               name: 'reconcileOrder',
               arguments: {
                 communityOrderId,
@@ -1668,12 +1631,38 @@ export class MockModelProvider implements ModelProvider {
       }
 
       if (toolName === 'requestPayment') {
-        const communityOrderId = this.lastCommunityOrderId || 'comm_order_001';
+        const payCount = this.toolResults(request.messages, 'requestPayment').length;
+        if (payCount < this.createdOrders.length) {
+          const next = this.createdOrders[payCount];
+          return {
+            content: 'Settling the next resident payment under the verified mandate...',
+            toolCalls: [
+              {
+                id: `call_req_payment_09_${payCount}`,
+                name: 'requestPayment',
+                arguments: {
+                  residentOrderId: next.orderId,
+                  amount: this.paymentAmountFor(next),
+                  idempotencyKey: `IDEMP-PAY-${next.orderId}`,
+                },
+              },
+            ],
+            finishReason: 'tool_calls',
+          };
+        }
+        const communityOrderId = this.communityOrderIds[0];
+        if (!communityOrderId) {
+          return {
+            content: 'Relay could not complete this procurement run. No persisted community order is available for delivery tracking. No delivery step was attempted.',
+            finishReason: 'stop',
+            raw: { code: 'MISSING_ORDER_EVIDENCE' },
+          };
+        }
         return {
           content: 'Payment successfully settled under mandate cap. Tracking and advancing delivery fulfillment...',
           toolCalls: [
             {
-              id: 'call_track_delivery_10',
+              id: 'call_track_delivery_10_0',
               name: 'trackDelivery',
               arguments: {
                 communityOrderId,
@@ -1686,12 +1675,36 @@ export class MockModelProvider implements ModelProvider {
       }
 
       if (toolName === 'trackDelivery') {
-        const communityOrderId = toolResult?.communityOrderId || this.lastCommunityOrderId || 'comm_order_001';
+        const trackCount = this.toolResults(request.messages, 'trackDelivery').length;
+        if (trackCount < this.communityOrderIds.length) {
+          return {
+            content: 'Tracking delivery for the next community order...',
+            toolCalls: [
+              {
+                id: `call_track_delivery_10_${trackCount}`,
+                name: 'trackDelivery',
+                arguments: {
+                  communityOrderId: this.communityOrderIds[trackCount],
+                  advanceStatus: 'DELIVERED',
+                },
+              },
+            ],
+            finishReason: 'tool_calls',
+          };
+        }
+        const communityOrderId = this.communityOrderIds[0];
+        if (!communityOrderId) {
+          return {
+            content: 'Relay could not complete this procurement run. No persisted community order is available for reconciliation. Reconciliation was not attempted.',
+            finishReason: 'stop',
+            raw: { code: 'MISSING_ORDER_EVIDENCE' },
+          };
+        }
         return {
           content: 'Delivery safely reached society security gate. Executing final deterministic reconciliation...',
           toolCalls: [
             {
-              id: 'call_reconcile_11',
+              id: 'call_reconcile_11_0',
               name: 'reconcileOrder',
               arguments: {
                 communityOrderId,
@@ -1703,6 +1716,23 @@ export class MockModelProvider implements ModelProvider {
       }
 
       if (toolName === 'reconcileOrder') {
+        // Reconcile any remaining community orders first.
+        const reconcileCount = this.toolResults(request.messages, 'reconcileOrder').length;
+        if (reconcileCount < this.communityOrderIds.length) {
+          return {
+            content: 'Reconciling the next community order...',
+            toolCalls: [
+              {
+                id: `call_reconcile_11_${reconcileCount}`,
+                name: 'reconcileOrder',
+                arguments: {
+                  communityOrderId: this.communityOrderIds[reconcileCount],
+                },
+              },
+            ],
+            finishReason: 'tool_calls',
+          };
+        }
         // The final message must derive from authoritative recorded tool
         // outcomes — never claim success when required steps failed.
         const failures = this.collectToolFailures(request.messages);
@@ -1712,26 +1742,43 @@ export class MockModelProvider implements ModelProvider {
               `Relay could not complete this procurement run. ${failures.length} backend step(s) reported failures (${failures.map((f) => f.name).join(', ')}). ` +
               `First failure: ${failures[0].message} No order was secured. Review the marked stages for the exact errors.`,
             finishReason: 'stop',
+            raw: { code: 'TOOL_EXECUTION_FAILED' },
           };
         }
-        // The success message names ONLY the mapped intent or the recorded
+        // The success message names ONLY the mapped intents or the recorded
         // order evidence — a fallback product here would be substitution.
+        // Single-item runs prefer the recorded (persisted) product name.
+        const intents = this.currentIntents();
+        if (intents.length === 1) {
+          const recordedSingle = findRecordedOrderItem(request.messages);
+          if (recordedSingle) {
+            const singleDesc = `${recordedSingle.quantity}${recordedSingle.unit === 'LITRE' ? 'L' : ` ${recordedSingle.unit}`} ${recordedSingle.productName.replace('Cold-Pressed ', '')}`;
+            return {
+              content:
+                `Relay autonomous procurement is complete. Your order for ${singleDesc} has been secured through community demand pooling under pre-authorized spending caps within the 12-hour fulfillment SLA.`,
+              finishReason: 'stop',
+            };
+          }
+        }
+        if (intents.length > 0) {
+          const itemDesc = intents
+            .map((m) => `${m.quantity}${m.unit === 'LITRE' ? 'L' : ` ${m.unit}`} ${m.productName}`)
+            .join(', ');
+          return {
+            content:
+              `Relay autonomous procurement is complete. Your order for ${itemDesc} has been secured through community demand pooling under pre-authorized spending caps within the 12-hour fulfillment SLA.`,
+            finishReason: 'stop',
+          };
+        }
         const recorded = findRecordedOrderItem(request.messages);
-        const item = this.activeIntent
-          ? {
-              quantity: this.activeIntent.quantity,
-              unit: this.activeIntent.unit,
-              productName: this.activeIntent.productName,
-            }
-          : recorded;
-        if (!item) {
+        if (!recorded) {
           return {
             content:
               'Relay autonomous procurement is complete. Your order has been secured through community demand pooling under pre-authorized spending caps within the 12-hour fulfillment SLA.',
             finishReason: 'stop',
           };
         }
-        const itemDesc = `${item.quantity}${item.unit === 'LITRE' ? 'L' : ` ${item.unit}`} ${item.productName.replace('Cold-Pressed ', '')}`;
+        const itemDesc = `${recorded.quantity}${recorded.unit === 'LITRE' ? 'L' : ` ${recorded.unit}`} ${recorded.productName.replace('Cold-Pressed ', '')}`;
         return {
           content:
             `Relay autonomous procurement is complete. Your order for ${itemDesc} has been secured through community demand pooling under pre-authorized spending caps within the 12-hour fulfillment SLA.`,
@@ -1744,6 +1791,75 @@ export class MockModelProvider implements ModelProvider {
     return {
       content: 'Relay Agent task finished successfully.',
       finishReason: 'stop',
+    };
+  }
+
+  /**
+   * Authoritative payment amount for a created resident order: the
+   * selected quote's total for that product (which is what the resident
+   * order is repriced to), falling back to the creation total.
+   */
+  private paymentAmountFor(created: { intent: IntentMatch; totalPrice: number }): number {
+    const selection = this.selections.find((s) => s.intent.productId === created.intent.productId);
+    return selection ? selection.totalPrice : created.totalPrice;
+  }
+
+  private currentIntents(): IntentMatch[] {
+    if (this.activeIntents.length > 0) return this.activeIntents;
+    return this.activeIntent ? [this.activeIntent] : [];
+  }
+
+  private toolResults(
+    messages: Array<{ role: string; name?: string; content: string }>,
+    toolName: string,
+  ): Array<Record<string, any>> {
+    const out: Array<Record<string, any>> = [];
+    for (const m of messages) {
+      if (m.role !== 'tool' || m.name !== toolName) continue;
+      const parsed = this.parseToolResult(m.content || '');
+      if (parsed) out.push(parsed);
+    }
+    return out;
+  }
+
+  private supplierGroups(): Array<{ supplierId: string; items: Array<{ intent: IntentMatch; supplierId: string; totalPrice: number }> }> {
+    const groups = new Map<string, Array<{ intent: IntentMatch; supplierId: string; totalPrice: number }>>();
+    for (const s of this.selections) {
+      const list = groups.get(s.supplierId) ?? [];
+      list.push(s);
+      groups.set(s.supplierId, list);
+    }
+    return [...groups.entries()].map(([supplierId, items]) => ({ supplierId, items }));
+  }
+
+  private communityOrderCall(
+    group: { supplierId: string; items: Array<{ intent: IntentMatch; supplierId: string; totalPrice: number }> },
+    groupIndex: number,
+  ): ModelResponse {
+    const deadline = new Date(Date.now() + 6 * 3600 * 1000).toISOString();
+    const contributingResidentOrderIds = group.items
+      .map((s) => this.createdOrders.find((c) => c.intent.productId === s.intent.productId)?.orderId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+    return {
+      content: 'Offer selected. Atomically creating community procurement order...',
+      toolCalls: [
+        {
+          id: `call_create_comm_order_07_${groupIndex}`,
+          name: 'createCommunityOrder',
+          arguments: {
+            supplierId: group.supplierId,
+            deliveryDeadline: deadline,
+            idempotencyKey: `IDEMP-AGENT-${contributingResidentOrderIds.join('-') || group.supplierId}`,
+            contributingResidentOrderIds,
+            items: group.items.map((s) => ({
+              productId: s.intent.productId,
+              totalQuantity: s.intent.quantity.toFixed(4),
+              negotiatedUnitPrice: (s.totalPrice / s.intent.quantity).toFixed(2),
+            })),
+          },
+        },
+      ],
+      finishReason: 'tool_calls',
     };
   }
 

@@ -59,10 +59,25 @@ export class FulfillmentOrderService {
 
     // Quantity calculations
     const primaryLine = input.purchaseOrder.lines[0];
-    const requestedQuantity = input.purchaseOrder.lines.reduce(
-      (acc, l) => acc + l.quantity,
-      0
+    const isSingleLine = input.purchaseOrder.lines.length === 1;
+    const allSameUnit = input.purchaseOrder.lines.every(
+      (l) => l.unit.toLowerCase() === input.purchaseOrder.lines[0].unit.toLowerCase()
     );
+    // Never sum quantities across heterogeneous products or measurement units.
+    const requestedQuantity = isSingleLine
+      ? input.purchaseOrder.lines[0].quantity
+      : allSameUnit
+        ? input.purchaseOrder.lines.reduce((acc, l) => acc + l.quantity, 0)
+        : input.purchaseOrder.lines[0].quantity;
+
+    const fulfillmentLines = input.purchaseOrder.lines.map((l) => ({
+      lineNumber: l.lineNumber,
+      productName: l.productName,
+      requestedQuantity: l.quantity,
+      fulfilledQuantity: 0,
+      remainingQuantity: l.quantity,
+      unit: l.unit,
+    }));
     const { remainingQuantity } = validateQuantities(requestedQuantity, 0);
 
     // Authoritative SLA Deadline
@@ -81,6 +96,7 @@ export class FulfillmentOrderService {
       supplierName: input.purchaseOrder.supplierName,
       fulfillmentType,
       status: 'CREATED',
+      lines: fulfillmentLines,
       productName: primaryLine?.productName || 'Procured Goods/Service',
       requestedQuantity,
       fulfilledQuantity: 0,

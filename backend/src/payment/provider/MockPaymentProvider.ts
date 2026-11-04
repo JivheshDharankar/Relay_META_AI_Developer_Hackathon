@@ -14,6 +14,7 @@ export class MockPaymentProvider implements PaymentProvider {
   public readonly isSimulated = true;
 
   private idempotencyCache = new Map<string, PaymentProviderResult>();
+  private refundedTransactions = new Set<string>();
   private simulationOverrides = new Map<string, MockSimulationOverride>();
   private globalFailureMode?: MockSimulationOverride;
 
@@ -124,6 +125,64 @@ export class MockPaymentProvider implements PaymentProvider {
     return successResult;
   }
 
+  /**
+   * Refunds a previously captured mock transaction. Only transactions this
+   * provider actually captured (present in its idempotency cache with a
+   * SUCCESS status) can be refunded; anything else fails honestly.
+   */
+  public async refund(input: {
+    providerTransactionId: string;
+    amount: number;
+    currency: string;
+  }): Promise<{ status: 'REFUNDED' | 'FAILED' | 'TIMEOUT'; providerTransactionId: string; failureReason?: string }> {
+    const override = this.simulationOverrides.get(input.providerTransactionId);
+    if (override) {
+      if (override.type === 'TIMEOUT') {
+        return {
+          status: 'TIMEOUT',
+          providerTransactionId: input.providerTransactionId,
+          failureReason: 'Refund gateway timeout',
+        };
+      }
+      if (override.type === 'FAILURE') {
+        return {
+          status: 'FAILED',
+          providerTransactionId: input.providerTransactionId,
+          failureReason: override.failureReason || 'Simulated refund decline',
+        };
+      }
+    }
+
+    if (this.refundedTransactions.has(input.providerTransactionId)) {
+      return { status: 'REFUNDED', providerTransactionId: input.providerTransactionId };
+    }
+
+    for (const result of this.idempotencyCache.values()) {
+      if (result.providerTransactionId === input.providerTransactionId && result.status === 'SUCCESS') {
+        this.refundedTransactions.add(input.providerTransactionId);
+        return { status: 'REFUNDED', providerTransactionId: input.providerTransactionId };
+      }
+    }
+    return {
+      status: 'FAILED',
+      providerTransactionId: input.providerTransactionId,
+      failureReason: `No captured transaction '${input.providerTransactionId}' exists to refund`,
+    };
+  }
+
+  public async lookupPayment(idempotencyKey: string): Promise<PaymentProviderResult | null> {
+    return this.idempotencyCache.get(idempotencyKey) || null;
+  }
+
+  public async lookupRefund(
+    providerTransactionId: string
+  ): Promise<{ status: 'REFUNDED' | 'FAILED' | 'TIMEOUT'; providerTransactionId: string; failureReason?: string } | null> {
+    if (this.refundedTransactions.has(providerTransactionId)) {
+      return { status: 'REFUNDED', providerTransactionId };
+    }
+    return null;
+  }
+
   // Simulation controls for testing & resilience verification
   public simulateFailure(
     key: string,
@@ -164,6 +223,7 @@ export class MockPaymentProvider implements PaymentProvider {
 
   public reset(): void {
     this.idempotencyCache.clear();
+    this.refundedTransactions.clear();
     this.simulationOverrides.clear();
     this.globalFailureMode = undefined;
   }

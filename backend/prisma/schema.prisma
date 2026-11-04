@@ -849,3 +849,35 @@ model UserSession {
   @@index([revokedAt])
   @@map("user_sessions")
 }
+
+/// Durable payment idempotency claim boundary for cross-instance and restart safety
+model PaymentIdempotencyClaim {
+  id           String   @id @default(uuid())
+  key          String   @unique
+  fingerprint  String
+  status       String   // PENDING | EXECUTED | FAILED | UNCERTAIN
+  paymentData  Json?    @map("payment_data")
+  providerTxId String?  @map("provider_tx_id")
+  failureCode  String?  @map("failure_code")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("payment_idempotency_claims")
+}
+
+/// Durable refund claim record enforcing exactly-once mandate crediting across instances and restarts
+model PaymentRefundClaim {
+  id                String    @id @default(uuid())
+  paymentId         String    @unique @map("payment_id")
+  status            String    // CLAIMED | REFUNDED | FAILED | UNCERTAIN
+  amount            Decimal   @db.Decimal(12, 2)
+  mandateId         String    @map("mandate_id")
+  providerTxId      String?   @map("provider_tx_id")
+  mandateCredited   Boolean   @default(false) @map("mandate_credited")
+  mandateCreditedAt DateTime? @map("mandate_credited_at")
+  refundedAt        DateTime? @map("refunded_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@map("payment_refund_claims")
+}

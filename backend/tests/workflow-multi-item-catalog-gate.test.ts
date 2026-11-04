@@ -9,6 +9,7 @@ import { ToolExecutionError } from '../src/agent/tools/registry';
 import { relayOrchestrator } from '../src/orchestration';
 import { rfqService } from '../src/discovery/supplier';
 import { SEED_IDS } from '../src/config/seedConstants';
+import { mandateService } from '../src/payment/mandate/MandateService';
 
 const RESIDENT = 'res_multi_gate_test';
 const SOCIETY = 'soc_multi_gate_test';
@@ -375,6 +376,15 @@ describe('Multi-item decomposition + catalog gate (entry boundary)', () => {
   });
 
   describe('D. End-to-end multi-item workflow via the tool', () => {
+    beforeAll(() => {
+      // Real mandate fixture: PAY never auto-creates consent.
+      mandateService.createMandate({
+        ownerReference: RESIDENT,
+        purpose: 'COMMUNITY_PROCUREMENT',
+        spendingLimit: 1000000,
+        currency: 'INR',
+      });
+    });
     it('8. dark chocolate + maida completes all 13 stages with both items conserved', async () => {
       const result = (await startWorkflowTool.execute(
         toolArgs('I need 2 kg dark chocolate and 5 kg maida within 12 hours.'),

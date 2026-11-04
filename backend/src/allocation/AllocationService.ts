@@ -4,8 +4,8 @@ import { ProcurementCommitment, PurchaseOrder } from '../discovery/supplier/sele
 import { FulfillmentOrder } from '../fulfillment/types';
 import { Payment } from '../payment/types';
 import { AllocationAuditService, allocationAuditService } from './AllocationAuditService';
-import { AllocationEngine, allocationEngine } from './AllocationEngine';
-import { CostAllocationService, costAllocationService } from './CostAllocationService';
+import { AllocationEngine, allocationEngine, QuantityAllocationResultItem } from './AllocationEngine';
+import { CostAllocationService, costAllocationService, LineCostInput } from './CostAllocationService';
 import { attachDemandLineIds } from './demandLineKey';
 import { ReconciliationService, reconciliationService } from './ReconciliationService';
 import { ResidentLedgerService, residentLedgerService } from './ResidentLedgerService';
@@ -33,6 +33,45 @@ export interface PrepareAllocationInput {
   residentDemands: ResidentDemand[];
   allowFractions?: boolean;
   idempotencyKey?: string;
+  purchaseOrder?: PurchaseOrder;
+}
+
+/**
+ * Identifies whether a product ID represents a genuine catalog identifier.
+ * Placeholder values such as 'prod_dynamic', empty strings, or open-world prefixes
+ * are not genuine catalog IDs and must not be used to group heterogeneous products.
+ */
+export function isCatalogProductId(productId?: string | null): boolean {
+  if (!productId || typeof productId !== 'string') return false;
+  const trimmed = productId.trim();
+  if (
+    trimmed === '' ||
+    trimmed === 'prod_dynamic' ||
+    trimmed.startsWith('open_world_') ||
+    trimmed.toLowerCase() === 'null' ||
+    trimmed.toLowerCase() === 'undefined'
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Returns a stable grouping key for product demand consolidation.
+ * Catalog products group by their real catalog product ID.
+ * Open-world products group strictly by their normalized (trimmed, lowercased, single-spaced) product name.
+ */
+export function getProductGroupingKey(productId?: string | null, productName?: string | null): string {
+  if (isCatalogProductId(productId)) {
+    return `catalog::${productId!.trim().toLowerCase()}`;
+  }
+  const normName = (productName ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!normName) {
+    throw new AllocationValidationError([
+      'PRODUCT_IDENTITY_MISSING: Demand item has neither a catalog productId nor a productName',
+    ]);
+  }
+  return `open_world::${normName}`;
 }
 
 export interface FinalizeAllocationInput {
@@ -91,12 +130,160 @@ export class AllocationService {
       0
     );
 
-    // 3. Deterministic Quantity Allocation (Whole-Unit Hamilton-Hare or Fractional)
-    const quantityResults = this.engine.allocateQuantities({
-      residentDemands,
-      verifiedFulfilledQuantity: totalVerifiedFulfilled,
-      allowFractions,
-    });
+    const fulfillmentLines = fulfillments.flatMap((f) => f.lines || []);
+    let quantityResults: QuantityAllocationResultItem[];
+
+    if (fulfillmentLines.length > 0 && residentDemands.length > 1) {
+      quantityResults = [];
+      const demandsByProduct = new Map<string, ResidentDemand[]>();
+      for (const d of residentDemands) {
+        const key = getProductGroupingKey(d.productId, d.productName);
+        const list = demandsByProduct.get(key) || [];
+        list.push(d);
+        demandsByProduct.set(key, list);
+      }
+
+      // Track matched fulfillment lines to prevent cross-product allocation or double-claiming
+      const matchedFulfillmentIndices = new Set<number>();
+
+      for (const groupDemands of demandsByProduct.values()) {
+        const sample = groupDemands[0];
+        const normSample = sample.productName.trim().toLowerCase().replace(/\s+/g, ' ');
+        const isCatalog = isCatalogProductId(sample.productId);
+        const matchingIndices: number[] = [];
+
+        // 1. Exact catalog match if catalog product
+        if (isCatalog) {
+          fulfillmentLines.forEach((fl, idx) => {
+            if (isCatalogProductId(fl.productId) && fl.productId!.trim().toLowerCase() === sample.productId!.trim().toLowerCase()) {
+              matchingIndices.push(idx);
+            }
+          });
+        }
+
+        // 2. Exact normalized name match
+        if (matchingIndices.length === 0) {
+          fulfillmentLines.forEach((fl, idx) => {
+            const normFl = (fl.productName ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+            if (normFl === normSample) {
+              matchingIndices.push(idx);
+            }
+          });
+        }
+
+        // 3. Fallback: fuzzy/contains name match only if unambiguous and no exact match
+        if (matchingIndices.length === 0) {
+          fulfillmentLines.forEach((fl, idx) => {
+            const normFl = (fl.productName ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+            if (normFl.length > 0 && (normFl.includes(normSample) || normSample.includes(normFl))) {
+              matchingIndices.push(idx);
+            }
+          });
+        }
+
+        if (matchingIndices.length === 0) {
+          throw new AllocationValidationError([
+            `UNMATCHED_FULFILLMENT_LINE: No fulfillment line matched product "${sample.productName}"`,
+          ]);
+        }
+
+        if (matchingIndices.length > 1) {
+          throw new AllocationValidationError([
+            `AMBIGUOUS_FULFILLMENT_LINE: Multiple fulfillment lines (${matchingIndices.length}) matched product "${sample.productName}"`,
+          ]);
+        }
+
+        const matchIdx = matchingIndices[0];
+        if (matchedFulfillmentIndices.has(matchIdx)) {
+          throw new AllocationValidationError([
+            `DUPLICATE_FULFILLMENT_MATCH: Fulfillment line for "${fulfillmentLines[matchIdx].productName}" was claimed by multiple product groups`,
+          ]);
+        }
+        matchedFulfillmentIndices.add(matchIdx);
+
+        const matchingFLine = fulfillmentLines[matchIdx];
+        const verifiedQty = matchingFLine.fulfilledQuantity;
+        const res = this.engine.allocateQuantities({
+          residentDemands: groupDemands,
+          verifiedFulfilledQuantity: verifiedQty,
+          allowFractions,
+        });
+        quantityResults.push(...res);
+      }
+
+      // Ensure no fulfillment lines were left unallocated
+      if (matchedFulfillmentIndices.size < fulfillmentLines.length) {
+        const unallocated = fulfillmentLines
+          .filter((_, idx) => !matchedFulfillmentIndices.has(idx))
+          .map((fl) => fl.productName);
+        throw new AllocationValidationError([
+          `UNALLOCATED_FULFILLMENT_LINES: The following fulfillment lines were not matched to any resident demand: ${unallocated.join(', ')}`,
+        ]);
+      }
+    } else {
+      // 3. Deterministic Quantity Allocation (Whole-Unit Hamilton-Hare or Fractional)
+      quantityResults = this.engine.allocateQuantities({
+        residentDemands,
+        verifiedFulfilledQuantity: totalVerifiedFulfilled,
+        allowFractions,
+      });
+    }
+
+    // Extract line costs from commitment items or purchase order lines
+    const lineCosts: LineCostInput[] = [];
+    if (commitment.items && commitment.items.length > 0) {
+      residentDemands.forEach((demand) => {
+        const matchedItem =
+          commitment.items?.find((item) => {
+            if (isCatalogProductId(item.productId) && isCatalogProductId(demand.productId)) {
+              return item.productId!.trim().toLowerCase() === demand.productId!.trim().toLowerCase();
+            }
+            const normItem = (item.productName ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+            const normD = demand.productName.trim().toLowerCase().replace(/\s+/g, ' ');
+            return normItem === normD || normItem.includes(normD) || normD.includes(normItem);
+          });
+
+        if (matchedItem) {
+          const unitPrice = matchedItem.unitPrice ?? 0;
+          const subtotal = roundMoney(unitPrice * demand.requestedQuantity).toNumber();
+          lineCosts.push({
+            demandLineId: demand.demandLineId,
+            residentOrderId: demand.residentOrderId,
+            productId: isCatalogProductId(matchedItem.productId) ? matchedItem.productId! : undefined,
+            productName: demand.productName,
+            unitPrice,
+            subtotal,
+            unit: demand.unit,
+          });
+        }
+      });
+    } else if (input.purchaseOrder?.lines && input.purchaseOrder.lines.length > 0) {
+      residentDemands.forEach((demand) => {
+        const matchedLine =
+          input.purchaseOrder?.lines.find((line) => {
+            if (isCatalogProductId(line.productId) && isCatalogProductId(demand.productId)) {
+              return line.productId!.trim().toLowerCase() === demand.productId!.trim().toLowerCase();
+            }
+            const normLine = (line.productName ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+            const normD = demand.productName.trim().toLowerCase().replace(/\s+/g, ' ');
+            return normLine === normD || normLine.includes(normD) || normD.includes(normLine);
+          });
+
+        if (matchedLine) {
+          const unitPrice = matchedLine.unitPrice;
+          const subtotal = roundMoney(unitPrice * demand.requestedQuantity).toNumber();
+          lineCosts.push({
+            demandLineId: demand.demandLineId,
+            residentOrderId: demand.residentOrderId,
+            productId: isCatalogProductId(matchedLine.productId) ? matchedLine.productId! : undefined,
+            productName: demand.productName,
+            unitPrice,
+            subtotal,
+            unit: demand.unit,
+          });
+        }
+      });
+    }
 
     // 4. Deterministic Cost Allocation with exact Paise Rounding Reconciliation
     const costResults = this.costService.allocateCosts(quantityResults, {
@@ -110,6 +297,7 @@ export class AllocationService {
       otherCharges: commitment.financials.otherCharges,
       total: commitment.financials.total,
       currency: commitment.financials.currency || 'INR',
+      lineCosts: lineCosts.length > 0 ? lineCosts : undefined,
     });
 
     // Contributing supplier IDs for multi-supplier traceability (zero competitor price leakage)
@@ -215,13 +403,58 @@ export class AllocationService {
     assertLegalAllocationTransition(summary.status, 'VALIDATED');
 
     const fulfillments = this.fulfillmentsByCommitment.get(commitmentId) || [];
-    const totalVerifiedFulfilled = fulfillments.reduce(
-      (sum, f) => sum + f.fulfilledQuantity,
-      0
-    );
+    const fulfillmentLines = fulfillments.flatMap((f) => f.lines || []);
 
-    // Validate fundamental quantity conservation
-    validateQuantityConservation(summary.totalAllocatedQuantity, totalVerifiedFulfilled);
+    if (fulfillmentLines.length > 0 && summary.allocations.length > 1) {
+      // Validate per-line quantity conservation using safe product identity
+      const matchedAllocationIds = new Set<string>();
+
+      for (const fLine of fulfillmentLines) {
+        const normF = (fLine.productName ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+        const isCatalog = isCatalogProductId(fLine.productId);
+
+        let matchingAllocations = summary.allocations.filter((a) => {
+          if (isCatalog && isCatalogProductId(a.productId)) {
+            return a.productId!.trim().toLowerCase() === fLine.productId!.trim().toLowerCase();
+          }
+          const normA = (a.productName ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+          return normA === normF;
+        });
+
+        if (matchingAllocations.length === 0) {
+          // Unambiguous fuzzy match fallback
+          const fuzzyMatches = summary.allocations.filter((a) => {
+            const normA = (a.productName ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+            return normA.length > 0 && (normA.includes(normF) || normF.includes(normA));
+          });
+          if (fuzzyMatches.length === 1) {
+            matchingAllocations = fuzzyMatches;
+          } else if (fuzzyMatches.length > 1) {
+            throw new AllocationValidationError([
+              `AMBIGUOUS_ALLOCATION_MATCH: Multiple allocations matched fulfillment line '${fLine.productName}'`,
+            ]);
+          } else {
+            throw new AllocationValidationError([
+              `UNMATCHED_FULFILLMENT_LINE: No allocation matched fulfillment line '${fLine.productName}'`,
+            ]);
+          }
+        }
+
+        for (const a of matchingAllocations) {
+          matchedAllocationIds.add(a.id);
+        }
+
+        const lineAllocated = matchingAllocations.reduce((sum, a) => sum + a.allocatedQuantity, 0);
+        validateQuantityConservation(lineAllocated, fLine.fulfilledQuantity);
+      }
+    } else {
+      const totalVerifiedFulfilled = fulfillments.reduce(
+        (sum, f) => sum + f.fulfilledQuantity,
+        0
+      );
+      // Validate fundamental quantity conservation
+      validateQuantityConservation(summary.totalAllocatedQuantity, totalVerifiedFulfilled);
+    }
 
     // Validate monetary conservation
     validateMonetaryConservation(

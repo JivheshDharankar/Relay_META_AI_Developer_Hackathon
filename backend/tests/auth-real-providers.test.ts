@@ -42,6 +42,7 @@ describe('Phase 12.5: Real Authentication Provider Integration', () => {
     emailService.clear();
     rateLimiterService.clear();
     smsService.getMockProvider().clear();
+    smsService.setProviderOverride('mock');
   });
 
   // =========================================================================

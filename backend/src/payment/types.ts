@@ -109,6 +109,10 @@ export interface Payment {
   updatedAt: Date;
   completedAt?: Date;
   /**
+   * Concurrency claim flag: true while an active refund attempt is in flight.
+   */
+  isRefunding?: boolean;
+  /**
    * True when the paid commercial basis came from simulated supplier
    * responses. Copied from the authorization; distinct from isSimulated,
    * which marks the payment provider/execution simulation.

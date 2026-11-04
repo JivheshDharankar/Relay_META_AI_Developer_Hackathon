@@ -6,6 +6,19 @@ import {
 import { QuantityAllocationResultItem } from './AllocationEngine';
 import { AllocationValidationError, validateMonetaryConservation, validateNonNegativity } from './validation';
 
+export interface LineCostInput {
+  demandLineId?: string;
+  residentOrderId?: string;
+  productId?: string;
+  productName?: string;
+  unitPrice: number;
+  subtotal: number;
+  tax?: number;
+  deliveryFee?: number;
+  otherCharges?: number;
+  unit?: string;
+}
+
 export interface ProcurementFinancialsInput {
   unitPrice?: number;
   subtotal: number;
@@ -14,6 +27,7 @@ export interface ProcurementFinancialsInput {
   otherCharges: number;
   total: number;
   currency?: string;
+  lineCosts?: LineCostInput[];
 }
 
 export interface ResidentCostItem {
@@ -91,22 +105,97 @@ export class CostAllocationService {
 
     const decTotalAllocated = toDecimal(totalAllocated);
 
-    // Proportional breakdown per resident
+    const hasLineCosts =
+      financials.lineCosts &&
+      financials.lineCosts.length > 0 &&
+      financials.lineCosts.some((lc) => lc.unitPrice > 0 || lc.subtotal > 0);
+
+    // Cost breakdown per resident / demand item
     const preliminaryItems = quantityAllocations.map((item) => {
       const decAlloc = toDecimal(item.allocatedQuantity);
-      const share = decAlloc.dividedBy(decTotalAllocated);
 
-      const subtotal = roundMoney(authoritativeSubtotal.times(share));
-      const allocatedTax = roundMoney(authoritativeTax.times(share));
-      const allocatedDeliveryFee = roundMoney(authoritativeDelivery.times(share));
-      const allocatedOtherCharges = roundMoney(authoritativeOther.times(share));
+      let subtotal: ReturnType<typeof toDecimal>;
+      let unitPrice = 0;
+      let allocatedTax: ReturnType<typeof toDecimal>;
+      let allocatedDeliveryFee: ReturnType<typeof toDecimal>;
+      let allocatedOtherCharges: ReturnType<typeof toDecimal>;
 
-      const unitPrice =
-        financials.unitPrice !== undefined
-          ? financials.unitPrice
-          : item.allocatedQuantity > 0
-          ? roundMoney(subtotal.dividedBy(decAlloc)).toNumber()
-          : 0;
+      if (hasLineCosts) {
+        let lc: LineCostInput;
+        const isSingleItem =
+          quantityAllocations.length === 1 && financials.lineCosts!.length === 1;
+
+        if (isSingleItem) {
+          // Rule 3 & 6: Resident-order fallback permitted only when there is exactly
+          // one financial line and exactly one allocation line.
+          lc = financials.lineCosts![0];
+        } else {
+          // Multi-item allocation: Rules 1, 2, 4, 5
+          // Rule 1: Exact demandLineId matching is authoritative.
+          // Rule 2: Never allow a shared residentOrderId to match a different product line.
+          // Rule 4: If an exact demand-line match is missing or ambiguous, fail closed.
+          // Rule 5: Do not silently fall back to array index or the first financial line.
+          if (!item.demandLineId) {
+            throw new AllocationValidationError([
+              `DEMAND_LINE_COST_UNMATCHED: Allocation item for resident order '${item.residentOrderId}' lacks a demandLineId in multi-item allocation`,
+            ]);
+          }
+
+          const matches = financials.lineCosts!.filter(
+            (c) => Boolean(c.demandLineId && c.demandLineId === item.demandLineId)
+          );
+
+          if (matches.length === 0) {
+            throw new AllocationValidationError([
+              `DEMAND_LINE_COST_UNMATCHED: No financial line cost matched demandLineId '${item.demandLineId}' for resident order '${item.residentOrderId}'`,
+            ]);
+          }
+
+          if (matches.length > 1) {
+            throw new AllocationValidationError([
+              `DEMAND_LINE_COST_AMBIGUOUS: Multiple financial line costs (${matches.length}) matched demandLineId '${item.demandLineId}'`,
+            ]);
+          }
+
+          lc = matches[0];
+        }
+
+        unitPrice = lc.unitPrice;
+        const lineUnitPriceDec = toDecimal(lc.unitPrice);
+
+        // Subtotal based on line unit price and allocated quantity
+        if (lc.subtotal !== undefined && item.requestedQuantity > 0 && item.allocatedQuantity === item.requestedQuantity) {
+          subtotal = roundMoney(toDecimal(lc.subtotal));
+        } else {
+          subtotal = roundMoney(lineUnitPriceDec.times(decAlloc));
+        }
+
+        // Apportion tax, delivery, and other charges proportionally to line subtotal
+        if (authoritativeSubtotal.isZero()) {
+          allocatedTax = toDecimal(0);
+          allocatedDeliveryFee = toDecimal(0);
+          allocatedOtherCharges = toDecimal(0);
+        } else {
+          const subtotalShare = subtotal.dividedBy(authoritativeSubtotal);
+          allocatedTax = roundMoney(authoritativeTax.times(subtotalShare));
+          allocatedDeliveryFee = roundMoney(authoritativeDelivery.times(subtotalShare));
+          allocatedOtherCharges = roundMoney(authoritativeOther.times(subtotalShare));
+        }
+      } else {
+        const share = decAlloc.dividedBy(decTotalAllocated);
+
+        subtotal = roundMoney(authoritativeSubtotal.times(share));
+        allocatedTax = roundMoney(authoritativeTax.times(share));
+        allocatedDeliveryFee = roundMoney(authoritativeDelivery.times(share));
+        allocatedOtherCharges = roundMoney(authoritativeOther.times(share));
+
+        unitPrice =
+          financials.unitPrice !== undefined
+            ? financials.unitPrice
+            : item.allocatedQuantity > 0
+            ? roundMoney(subtotal.dividedBy(decAlloc)).toNumber()
+            : 0;
+      }
 
       return {
         residentOrderId: item.residentOrderId,
@@ -142,10 +231,42 @@ export class CostAllocationService {
 
     if (sortedForResidual.length > 0) {
       const target = sortedForResidual[0];
-      if (!diffSubtotal.isZero()) target.subtotalDec = target.subtotalDec.plus(diffSubtotal);
-      if (!diffTax.isZero()) target.taxDec = target.taxDec.plus(diffTax);
-      if (!diffDelivery.isZero()) target.deliveryDec = target.deliveryDec.plus(diffDelivery);
-      if (!diffOther.isZero()) target.otherDec = target.otherDec.plus(diffOther);
+      if (!diffSubtotal.isZero()) {
+        const candidate = target.subtotalDec.plus(diffSubtotal);
+        if (candidate.lessThan(0)) {
+          throw new AllocationValidationError([
+            `RESIDUAL_PAISE_REJECTED: Residual subtotal adjustment (${diffSubtotal.toString()}) would make target allocation negative (${candidate.toString()})`,
+          ]);
+        }
+        target.subtotalDec = candidate;
+      }
+      if (!diffTax.isZero()) {
+        const candidate = target.taxDec.plus(diffTax);
+        if (candidate.lessThan(0)) {
+          throw new AllocationValidationError([
+            `RESIDUAL_PAISE_REJECTED: Residual tax adjustment (${diffTax.toString()}) would make target allocation negative (${candidate.toString()})`,
+          ]);
+        }
+        target.taxDec = candidate;
+      }
+      if (!diffDelivery.isZero()) {
+        const candidate = target.deliveryDec.plus(diffDelivery);
+        if (candidate.lessThan(0)) {
+          throw new AllocationValidationError([
+            `RESIDUAL_PAISE_REJECTED: Residual delivery adjustment (${diffDelivery.toString()}) would make target allocation negative (${candidate.toString()})`,
+          ]);
+        }
+        target.deliveryDec = candidate;
+      }
+      if (!diffOther.isZero()) {
+        const candidate = target.otherDec.plus(diffOther);
+        if (candidate.lessThan(0)) {
+          throw new AllocationValidationError([
+            `RESIDUAL_PAISE_REJECTED: Residual other charges adjustment (${diffOther.toString()}) would make target allocation negative (${candidate.toString()})`,
+          ]);
+        }
+        target.otherDec = candidate;
+      }
     }
 
     // Assemble final resident cost records

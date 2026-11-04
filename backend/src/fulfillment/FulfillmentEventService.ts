@@ -82,6 +82,13 @@ export class FulfillmentEventService {
         order.remainingQuantity = remainingQuantity;
       }
 
+      if (event.eventType === 'ORDER_DELIVERED' && order.lines && order.lines.length > 0) {
+        for (const line of order.lines) {
+          line.fulfilledQuantity = line.requestedQuantity;
+          line.remainingQuantity = 0;
+        }
+      }
+
       // 6. Tracking Reference Update
       if (event.trackingReference) {
         order.trackingReference = event.trackingReference;

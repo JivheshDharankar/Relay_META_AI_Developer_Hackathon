@@ -89,6 +89,7 @@ describe('Phase 7: Authorized Payment, Mandates & Financial Execution', () => {
     defaultCommitmentService.reset();
     defaultPOService.reset();
     defaultPaymentService.reset();
+    await defaultPaymentService.clearDurableClaims();
     defaultMandateService.reset();
     defaultMockProvider.reset();
 

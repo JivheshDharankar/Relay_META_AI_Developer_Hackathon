@@ -15,5 +15,26 @@ export interface PaymentProvider {
   authorizeAndCapture(
     request: PaymentExecutionRequest
   ): Promise<PaymentProviderResult>;
+
+  /**
+   * Optional refund of a previously captured transaction. Providers that
+   * cannot refund must not implement this; callers fail closed instead of
+   * fabricating a refund.
+   */
+  refund?(input: {
+    providerTransactionId: string;
+    amount: number;
+    currency: string;
+  }): Promise<{ status: 'REFUNDED' | 'FAILED' | 'TIMEOUT'; providerTransactionId: string; failureReason?: string }>;
+
+  /**
+   * Queries provider status by idempotency key to recover from crashes / network loss.
+   */
+  lookupPayment?(idempotencyKey: string): Promise<PaymentProviderResult | null>;
+
+  /**
+   * Queries provider refund status by transaction ID to recover from crashes / network loss.
+   */
+  lookupRefund?(providerTransactionId: string): Promise<{ status: 'REFUNDED' | 'FAILED' | 'TIMEOUT'; providerTransactionId: string; failureReason?: string } | null>;
 }
 

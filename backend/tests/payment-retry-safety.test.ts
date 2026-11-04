@@ -62,6 +62,7 @@ describe('Phase 17.2 — uncertain retry guardrail', () => {
     defaultCommitmentService.reset();
     defaultPOService.reset();
     defaultPaymentService.reset();
+    await defaultPaymentService.clearDurableClaims();
     defaultMandateService.reset();
     defaultMockProvider.reset();
 
@@ -190,8 +191,16 @@ describe('Phase 17.2 — uncertain retry guardrail', () => {
       defaultMockProvider.setGlobalFailure({ type: 'TIMEOUT', isRetryable: true });
 
       const orchestrator = new RelayOrchestrator();
+      const retryResident = `res_autoretry_${randomUUID().slice(0, 8)}`;
+      // Real mandate fixture: PAY must never auto-create consent.
+      defaultMandateService.createMandate({
+        ownerReference: retryResident,
+        purpose: 'COMMUNITY_PROCUREMENT',
+        spendingLimit: 1000000,
+        currency: 'INR',
+      });
       const workflow = await orchestrator.submitRequest({
-        residentReference: `res_autoretry_${randomUUID().slice(0, 8)}`,
+        residentReference: retryResident,
         requestText: 'I need 2 kg maida.',
         location: {
           address: '100 Feet Road, Indiranagar, Bengaluru',

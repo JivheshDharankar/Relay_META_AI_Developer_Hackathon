@@ -302,6 +302,48 @@ export class RelayAgent {
           };
         }
 
+        // Case B1: some tools succeeded but at least one failed and the
+        // model stopped with an explicit failure signal. A partially
+        // failed run must never be reported as a completed procurement.
+        const rawFailureCode = (modelResponse.raw as { code?: unknown } | undefined)?.code;
+        const firstFailedStep = steps.find((s) => s.toolCall?.error)?.toolCall
+          ?.error as { code?: unknown; message?: unknown } | undefined;
+        if (typeof rawFailureCode === 'string' && rawFailureCode.length > 0) {
+          const partialError = {
+            code:
+              firstFailedStep &&
+              typeof firstFailedStep.code === 'string' &&
+              firstFailedStep.code.length > 0
+                ? firstFailedStep.code
+                : rawFailureCode,
+            message:
+              finalResponse ||
+              (firstFailedStep && typeof firstFailedStep.message === 'string'
+                ? firstFailedStep.message
+                : 'Relay could not complete this procurement run.'),
+          };
+          await this.recordAudit({
+            eventType: AuditEventType.AGENT_WORKFLOW_FAILED,
+            actor: 'agent:relay',
+            entityType: 'AgentRun',
+            entityId: runId,
+            metadata: {
+              error: partialError.code,
+              message: partialError.message,
+              totalSteps: currentStep,
+            },
+          });
+          return {
+            success: false,
+            runId,
+            completed: false,
+            steps,
+            totalSteps: currentStep,
+            response: finalResponse,
+            error: partialError,
+          };
+        }
+
         // Record AGENT_WORKFLOW_COMPLETED
         await this.recordAudit({
           eventType: AuditEventType.AGENT_WORKFLOW_COMPLETED,

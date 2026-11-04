@@ -171,6 +171,24 @@ export class ExecutionService {
 
     const requestedAmount = input.amount ?? Number(order.totalAmount);
 
+    // Amount sanity: a non-positive or non-finite amount can never be
+    // authorized or charged (the controller's Number(...) coercion must
+    // not smuggle NaN through).
+    if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+      throw new ExecutionError(
+        'INVALID_AMOUNT',
+        `Payment amount must be a positive finite number; received '${input.amount}'`
+      );
+    }
+
+    // Order-state gate: cancelled/failed orders are never payable.
+    if (order.status === ResidentOrderStatus.CANCELLED || order.status === ResidentOrderStatus.FAILED) {
+      throw new ExecutionError(
+        'ORDER_NOT_PAYABLE',
+        `Resident order '${order.id}' is ${order.status} and cannot be paid`
+      );
+    }
+
     // 2. Deterministic Authorization Check
     const authResult = await authorizationService.checkAuthorization({
       residentId: order.residentId,
@@ -235,7 +253,56 @@ export class ExecutionService {
       },
     });
 
-    // 4. Invoke PaymentAdapter
+    // 4. Claim the payment BEFORE calling the provider: a PROCESSING row
+    // keyed by the idempotency key (or the order itself) is inserted first.
+    // The unique key makes concurrent duplicates fail fast instead of both
+    // charging the provider; only the claim holder proceeds to execute.
+    const claimKey = input.idempotencyKey ?? `order:${order.id}`;
+    let claimId: string;
+    try {
+      const claim = await prisma.payment.create({
+        data: {
+          idempotencyKey: claimKey,
+          residentOrderId: order.id,
+          paymentMandateId: mandate.id,
+          amount: requestedAmount,
+          currency: order.currency,
+          status: PaymentStatus.PROCESSING,
+          authorizedAt: new Date(),
+        },
+      });
+      claimId = claim.id;
+    } catch (claimErr: any) {
+      if (claimErr?.code === 'P2002') {
+        const existing = await prisma.payment.findUnique({
+          where: { idempotencyKey: claimKey },
+        });
+        if (existing?.status === PaymentStatus.SUCCESS) {
+          return {
+            success: true,
+            orderId: order.id,
+            residentOrderStatus: ResidentOrderStatus.PAID,
+            payment: {
+              success: true,
+              paymentId: existing.id,
+              providerReference: existing.providerReference ?? 'PREVIOUSLY_EXECUTED',
+              status: PaymentStatus.SUCCESS,
+              amount: Number(existing.amount),
+              currency: existing.currency,
+              executedAt: existing.completedAt ?? existing.createdAt,
+              isDuplicate: true,
+            },
+          };
+        }
+        throw new ExecutionError(
+          'PAYMENT_IN_PROGRESS',
+          `A payment for order '${order.id}' is already in progress under this idempotency key`
+        );
+      }
+      throw claimErr;
+    }
+
+    // 5. Invoke PaymentAdapter (only the claim holder reaches here)
     let adapterResponse;
     try {
       adapterResponse = await this.paymentAdapter.execute({
@@ -243,12 +310,23 @@ export class ExecutionService {
         paymentMandateId: mandate.id,
         amount: requestedAmount,
         currency: order.currency,
-        idempotencyKey: input.idempotencyKey,
+        idempotencyKey: claimKey,
         purpose: input.purpose,
       });
     } catch (err) {
       const code = err instanceof PaymentAdapterError ? err.code : 'PAYMENT_GATEWAY_UNAVAILABLE';
       const reason = err instanceof Error ? err.message : 'Payment provider error';
+      // Release the claim as FAILED (key freed) so an honest retry is
+      // possible; the failure itself stays persisted.
+      await prisma.payment.update({
+        where: { id: claimId },
+        data: {
+          idempotencyKey: null,
+          status: PaymentStatus.FAILED,
+          failureCode: code,
+          failedAt: new Date(),
+        },
+      }).catch(() => undefined);
       await prisma.auditEvent.create({
         data: {
           eventType: AuditEventType.PAYMENT_EXECUTION_FAILED,
@@ -264,14 +342,12 @@ export class ExecutionService {
     const now = new Date();
 
     if (!adapterResponse.success) {
-      // Persist failed payment record
-      await prisma.payment.create({
+      // Persist the failure on the claim row and free the idempotency key
+      // so a corrected retry is not mistaken for a duplicate charge.
+      await prisma.payment.update({
+        where: { id: claimId },
         data: {
-          idempotencyKey: input.idempotencyKey,
-          residentOrderId: order.id,
-          paymentMandateId: mandate.id,
-          amount: requestedAmount,
-          currency: order.currency,
+          idempotencyKey: null,
           status: PaymentStatus.FAILED,
           providerReference: adapterResponse.providerReference,
           failureCode: adapterResponse.failureCode ?? 'PAYMENT_EXECUTION_FAILED',
@@ -313,7 +389,10 @@ export class ExecutionService {
           },
         });
 
-        if (concurrentSuccess) {
+        if (concurrentSuccess && concurrentSuccess.id !== claimId) {
+          // Another execution settled this order first: drop our claim so
+          // no stranded PROCESSING row keeps consuming mandate capacity.
+          await tx.payment.delete({ where: { id: claimId } }).catch(() => undefined);
           return {
             orderId: order.id,
             residentOrderStatus: ResidentOrderStatus.PAID,
@@ -330,13 +409,9 @@ export class ExecutionService {
           };
         }
 
-        const newPayment = await tx.payment.create({
+        const newPayment = await tx.payment.update({
+          where: { id: claimId },
           data: {
-            idempotencyKey: input.idempotencyKey,
-            residentOrderId: order.id,
-            paymentMandateId: mandate.id,
-            amount: requestedAmount,
-            currency: order.currency,
             status: PaymentStatus.SUCCESS,
             providerReference: adapterResponse.providerReference,
             authorizedAt: now,

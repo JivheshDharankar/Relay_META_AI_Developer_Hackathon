@@ -1,4 +1,4 @@
-import { ModelProvider } from './ModelProvider';
+import { ModelProvider, ModelProviderError } from './ModelProvider';
 import { MockModelProvider } from './MockModelProvider';
 import { MetaModelProvider } from './MetaModelProvider';
 import { MetaSparkProvider } from './MetaSparkProvider';
@@ -30,7 +30,13 @@ export function getModelProvider(providerName?: string): ModelProvider {
     case 'spark-open':
       return new SparkOpenProvider();
     case 'mock':
-    default:
       return new MockModelProvider();
+    default:
+      // Fail closed: an unrecognized provider name must never silently
+      // degrade the deployment to deterministic mock behavior.
+      throw new ModelProviderError(
+        'UNKNOWN_MODEL_PROVIDER',
+        `Unknown model provider '${chosen}'. Supported providers: mock, meta, meta-spark, meta-model, spark-open.`
+      );
   }
 }

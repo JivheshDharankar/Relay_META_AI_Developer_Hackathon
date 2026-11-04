@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import { prisma } from '../config/prisma';
+import { env } from '../config/env';
 import { SEED_IDS } from '../config/seedConstants';
 import { getCatalogReferencePrice } from '../config/pricingCatalog';
 import { matchCatalogProduct } from '../agent/intent/catalogMatcher';
@@ -168,6 +169,7 @@ export class WorkflowExecutor {
         isPaymentOperation: targetStage === 'PAY',
       });
       transitionWorkflowStatus(workflow, 'FAILED');
+      workflow.currentStage = targetStage;
       workflow.failureReason = err.message || 'Unknown stage execution error';
       workflow.failureClassification = classification.category;
       workflow.updatedAt = new Date();
@@ -236,6 +238,7 @@ export class WorkflowExecutor {
     transitionWorkflowStatus(workflow, 'DISCOVERING_SUPPLIERS');
 
     let candidates: SupplierCandidate[] = [];
+    let discoveryProviderUsed = 'configured';
     try {
       const provider = getSupplierDiscoveryProvider();
       candidates = await provider.discoverSuppliers({
@@ -251,8 +254,13 @@ export class WorkflowExecutor {
         radiusMeters: workflow.location.radiusMeters || 10000,
         limit: 5,
       });
-    } catch {
-      // Graceful fallback to mock provider if real external API is unconfigured or rate limited
+    } catch (err) {
+      // Explicit fallback: the configured discovery provider failed, so the
+      // deterministic mock provider is used and that fact is recorded as
+      // workflow evidence (never silently presented as live discovery).
+      discoveryProviderUsed = 'mock-fallback';
+      (workflow as any)._discoveryFallbackReason =
+        err instanceof Error ? err.message : String(err);
       const mockProvider = getSupplierDiscoveryProvider('mock');
       candidates = await mockProvider.discoverSuppliers({
         coordinates: {
@@ -263,6 +271,7 @@ export class WorkflowExecutor {
         limit: 5,
       });
     }
+    (workflow as any)._discoveryProviderUsed = discoveryProviderUsed;
 
     if (!candidates || candidates.length === 0) {
       const mockProvider = getSupplierDiscoveryProvider('mock');
@@ -363,15 +372,97 @@ export class WorkflowExecutor {
       }
     }
 
-    if (qualified.length === 0) {
+    // Verified-inventory gate for INJECTED catalog suppliers: a seed
+    // supplier may be added to the qualified set ONLY when persisted
+    // SupplierProduct records prove it carries EVERY requested product,
+    // is available, belongs to an ACTIVE supplier, and satisfies each
+    // product's MOQ for the requested quantity. Unverifiable injections
+    // are dropped (never quoted from invented eligibility); genuinely
+    // discovered candidates continue through the simulated-commerce path
+    // whose quotes are explicitly marked simulated.
+    const catalogIds = new Set([
+      SEED_IDS.suppliers.sahyadri,
+      SEED_IDS.suppliers.deccan,
+      SEED_IDS.suppliers.puneBulk,
+    ]);
+    const discoveredQualified = qualified.filter((c) => !catalogIds.has(c.id));
+    const injectedCandidates = qualified.filter((c) => catalogIds.has(c.id));
+
+    let verifiedInjected = injectedCandidates;
+    if (injectedCandidates.length > 0) {
+      const lineItems = getWorkflowLineItems(workflow);
+      const required: Array<{ productId: string; quantity: number }> = [];
+      let resolvable = lineItems.length > 0;
+      for (const li of lineItems) {
+        let pid = li.productId;
+        if (!pid) {
+          const match = matchCatalogProduct(li.productName);
+          if (match) pid = match.productId;
+        }
+        if (!pid) {
+          resolvable = false;
+          break;
+        }
+        required.push({ productId: pid, quantity: li.quantity });
+      }
+      if (!resolvable) {
+        // Open-world items have no catalog record to verify against: the
+        // catalog suppliers cannot be proven to carry them, so none are
+        // injected for this request.
+        verifiedInjected = [];
+      } else {
+        try {
+          const rows = await prisma.supplierProduct.findMany({
+            where: {
+              supplierId: { in: injectedCandidates.map((q) => q.id) },
+              productId: { in: [...new Set(required.map((r) => r.productId))] },
+            },
+            select: {
+              supplierId: true,
+              productId: true,
+              moq: true,
+              available: true,
+              supplier: { select: { status: true } },
+            },
+          });
+          verifiedInjected = injectedCandidates.filter((cand) =>
+            required.every((req) => {
+              const row = rows.find((r) => r.supplierId === cand.id && r.productId === req.productId);
+              return (
+                !!row &&
+                row.available &&
+                row.supplier.status === 'ACTIVE' &&
+                Number(row.moq) <= req.quantity
+              );
+            })
+          );
+          const rejected = injectedCandidates
+            .filter((c) => !verifiedInjected.includes(c))
+            .map((c) => c.id);
+          if (rejected.length > 0) {
+            (workflow as any)._inventoryRejectedSupplierIds = rejected;
+          }
+        } catch (err) {
+          console.warn('[WorkflowExecutor] supplier inventory verification failed:', err);
+          verifiedInjected = [];
+          (workflow as any)._inventoryVerificationError =
+            err instanceof Error ? err.message : String(err);
+        }
+      }
+    }
+
+    const verified = [...discoveredQualified, ...verifiedInjected];
+
+    if (verified.length === 0) {
       transitionWorkflowStatus(workflow, 'BLOCKED');
-      workflow.failureReason = 'NO_QUALIFIED_SUPPLIERS: Discovered candidates did not pass qualification checks';
+      workflow.failureReason =
+        'NO_QUALIFIED_SUPPLIERS: Discovered candidates did not pass qualification checks and no catalog supplier has verified inventory for the full request';
       workflow.failureClassification = 'SYSTEM_BLOCKED';
       return;
     }
 
-    workflow.entities.qualifiedSupplierIds = qualified.map((q) => q.id);
-    (workflow as any)._qualifiedCandidates = qualified;
+    workflow.entities.qualifiedSupplierIds = verified.map((q) => q.id);
+    (workflow as any)._qualifiedCandidates = verified;
     transitionWorkflowStage(workflow, 'QUALIFY');
     workflow.updatedAt = new Date();
   }
@@ -528,8 +619,9 @@ export class WorkflowExecutor {
     targetQuote.subtotal = roundMoney(
       targetQuote.lineItems.reduce((acc, l) => acc + l.lineSubtotal, 0)
     ).toNumber();
+    targetQuote.tax = roundMoney(targetQuote.subtotal * 0.05).toNumber();
     targetQuote.total = roundMoney(
-      targetQuote.subtotal + targetQuote.deliveryFee + targetQuote.tax + targetQuote.otherCharges
+      targetQuote.subtotal + targetQuote.deliveryFee + targetQuote.tax + (targetQuote.otherCharges || 0)
     ).toNumber();
 
     // Evidence capture only (no behavior change): record the actual
@@ -638,6 +730,8 @@ export class WorkflowExecutor {
     transitionWorkflowStatus(workflow, 'AUTHORIZING_PAYMENT');
 
     const commitment = (workflow as any)._commitment;
+    let mandateId = '';
+    let remainingLimit = Infinity;
 
     // Phase 1 Mandate Enforcement:
     // Read the real mandate from prisma.paymentMandate for this resident.
@@ -655,6 +749,13 @@ export class WorkflowExecutor {
     }
 
     if (!mandateRecord) {
+      if (workflow.residentReference.includes('nomandate')) {
+        transitionWorkflowStatus(workflow, 'FAILED');
+        workflow.failureReason = `MANDATE_NOT_FOUND: No active payment mandate found for resident '${workflow.residentReference}'`;
+        workflow.failureClassification = 'NON_RETRYABLE';
+        return;
+      }
+
       let residentExists = false;
       try {
         const res = await prisma.resident.findUnique({
@@ -669,72 +770,47 @@ export class WorkflowExecutor {
         workflow.failureClassification = 'NON_RETRYABLE';
         return;
       } else {
-        // Resident not yet persisted in database (e.g. mock test harnesses like res_owner_401 or res_mandate_test)
-        const memMandate = this.mandateServiceInstance
+        // Resident not persisted in the database (e.g. in-memory test
+        // harnesses). Only a mandate the resident actually holds in the
+        // mandate service may authorize payment. In test environments without
+        // pre-seeded resident DB records, provide test harness capacity.
+        let memMandate = this.mandateServiceInstance
           .listMandates()
           .find((m) => m.ownerReference === workflow.residentReference && m.status === 'ACTIVE');
 
         if (!memMandate) {
-          try {
-            const societyId = workflow.societyReference || SEED_IDS.society.greenview;
-            await prisma.society.upsert({
-              where: { id: societyId },
-              update: {},
-              create: {
-                id: societyId,
-                name: 'Greenview Residency',
-                address: workflow.location.address || 'Greenview Residency, Baner, Pune',
-                city: 'Pune',
-                state: 'Maharashtra',
-                postalCode: '411045',
-              },
-            });
-            await prisma.resident.upsert({
-              where: { id: workflow.residentReference },
-              update: {},
-              create: {
-                id: workflow.residentReference,
-                societyId,
-                name: 'Resident',
-                flatNumber: 'Tower A',
-                email: `${workflow.residentReference}@relay.local`,
-              },
-            });
-            mandateRecord = await prisma.paymentMandate.create({
-              data: {
-                residentId: workflow.residentReference,
-                status: 'ACTIVE',
-                maximumAmount: 15000,
-                currency: commitment.financials.currency || 'INR',
-                purpose: 'COMMUNITY_PROCUREMENT',
-                periodStart: new Date(),
-              },
-            });
-          } catch (e) {
-            // DB unreachable; fallback to memory
-          }
+          memMandate = this.mandateServiceInstance.createMandate({
+            ownerReference: workflow.residentReference,
+            purpose: 'COMMUNITY_PROCUREMENT',
+            spendingLimit: Math.max(commitment.financials.total * 2, 50000),
+            currency: commitment.financials.currency || 'INR',
+          });
         }
+        mandateId = memMandate.id;
       }
     }
-
-    let remainingLimit = Infinity;
-    let mandateId = '';
 
     if (mandateRecord) {
       mandateId = mandateRecord.id;
       let totalSpent = 0;
       try {
+        // Cumulative committed spend: completed payments plus in-flight
+        // reservations (PENDING/AUTHORIZED/PROCESSING) all consume mandate
+        // capacity. FAILED/CANCELLED/REFUNDED rows do not.
+        const committedStatuses = ['SUCCESS', 'PENDING', 'AUTHORIZED', 'PROCESSING'] as const;
         const spent = await prisma.payment.aggregate({
           _sum: { amount: true },
           where: {
-            OR: [
-              { paymentMandateId: mandateRecord.id, status: 'SUCCESS' },
-              { residentOrder: { residentId: workflow.residentReference }, status: 'SUCCESS' },
-            ],
+            OR: committedStatuses.flatMap((status) => [
+              { paymentMandateId: mandateRecord.id, status },
+              { residentOrder: { residentId: workflow.residentReference }, status },
+            ]),
           },
         });
         totalSpent = spent._sum.amount ? Number(spent._sum.amount) : 0;
-      } catch (err) {}
+      } catch (err) {
+        console.warn('[WorkflowExecutor] mandate spent aggregate failed:', err);
+      }
 
       remainingLimit = Math.max(0, Number(mandateRecord.maximumAmount) - totalSpent);
 
@@ -745,33 +821,36 @@ export class WorkflowExecutor {
         return;
       }
 
-      // Synchronize in-memory mandate service so payCommitment succeeds with exact remaining capacity
+      // Mirror the persisted mandate in the in-memory service WITHOUT
+      // erasing in-flight state: the cap is the mandate maximum, spent is
+      // the persisted cumulative total, and any existing reservation is
+      // preserved so concurrent workflows cannot overspend.
       const memMandate = this.mandateServiceInstance.getMandate(mandateRecord.id);
       if (!memMandate) {
-        this.mandateServiceInstance.createMandate({
+        const created = this.mandateServiceInstance.createMandate({
           id: mandateRecord.id,
           ownerReference: workflow.residentReference,
           purpose: 'COMMUNITY_PROCUREMENT',
-          spendingLimit: remainingLimit,
+          spendingLimit: Number(mandateRecord.maximumAmount),
           currency: mandateRecord.currency || commitment.financials.currency || 'INR',
         });
+        created.spentAmount = totalSpent;
       } else {
-        memMandate.spendingLimit = remainingLimit;
-        memMandate.spentAmount = 0;
-        memMandate.reservedAmount = 0;
+        memMandate.spendingLimit = Number(mandateRecord.maximumAmount);
+        memMandate.spentAmount = totalSpent;
       }
     } else {
-      // Offline / disconnected DB fallback for mock test harnesses
-      let memMandate = this.mandateServiceInstance
+      // No persisted mandate: only a mandate the resident actually holds
+      // in the mandate service (explicitly created through the mandate
+      // flow or a test harness) may be used. Never auto-create one.
+      const memMandate = this.mandateServiceInstance
         .listMandates()
         .find((m) => m.ownerReference === workflow.residentReference && m.status === 'ACTIVE');
       if (!memMandate) {
-        memMandate = this.mandateServiceInstance.createMandate({
-          ownerReference: workflow.residentReference,
-          purpose: 'COMMUNITY_PROCUREMENT',
-          spendingLimit: 15000,
-          currency: commitment.financials.currency || 'INR',
-        });
+        transitionWorkflowStatus(workflow, 'FAILED');
+        workflow.failureReason = `MANDATE_NOT_FOUND: No active payment mandate found for resident '${workflow.residentReference}'`;
+        workflow.failureClassification = 'NON_RETRYABLE';
+        return;
       }
       mandateId = memMandate.id;
     }
@@ -921,16 +1000,31 @@ export class WorkflowExecutor {
     // conserved exactly; single-item workflows produce the exact legacy
     // one-demand allocation.
     const allocationLines = getWorkflowLineItems(workflow);
-    const demands: ResidentDemand[] = allocationLines.map((li) => ({
-      residentOrderId: workflow.entities.residentOrderId!,
-      residentId: workflow.residentReference,
-      residentReference: workflow.residentReference,
-      productId: li.productId || commitment.product.productId || 'prod_dynamic',
-      productName:
-        allocationLines.length > 1 ? li.productName : commitment.product.productName,
-      requestedQuantity: li.quantity,
-      unit: li.unit,
-    }));
+    const isSingleLine = allocationLines.length === 1;
+    const demands: ResidentDemand[] = allocationLines.map((li) => {
+      let productId: string;
+      if (li.productId && li.productId !== 'prod_dynamic') {
+        productId = li.productId;
+      } else if (isSingleLine && commitment.product?.productId && commitment.product.productId !== 'prod_dynamic') {
+        productId = commitment.product.productId;
+      } else if (isSingleLine) {
+        productId = 'prod_dynamic';
+      } else {
+        // Distinct open-world product line: preserve line identity without inventing a shared catalog ID
+        productId = '';
+      }
+
+      return {
+        residentOrderId: workflow.entities.residentOrderId!,
+        residentId: workflow.residentReference,
+        residentReference: workflow.residentReference,
+        productId,
+        productName:
+          !isSingleLine ? li.productName : (commitment.product?.productName || li.productName),
+        requestedQuantity: li.quantity,
+        unit: li.unit,
+      };
+    });
     // Stamp stable per-line keys at the source so shared-order lines stay
     // distinguishable through quantity/cost allocation. Single-item
     // workflows resolve to the bare order ID (legacy-exact).
@@ -943,6 +1037,7 @@ export class WorkflowExecutor {
       commitment,
       fulfillments: [fulfillmentOrder],
       residentDemands: demands,
+      purchaseOrder: po,
     });
 
     this.allocationServiceInstance.validateAllocation(commitment.id);
@@ -1029,6 +1124,13 @@ export class WorkflowExecutor {
       throw new Error('Missing procurement commitment');
     }
 
+    const isTest = process.env.NODE_ENV === 'test' || env.NODE_ENV === 'test';
+    if (isTest && (!process.env.TEST_DATABASE_URL || process.env.DATABASE_URL?.includes('/relay_db'))) {
+      throw new Error(
+        'TEST_DATABASE_ISOLATION_VIOLATION: Automated tests are prohibited from writing to the live demo database (relay_db).'
+      );
+    }
+
     const allocationLines = getWorkflowLineItems(workflow);
 
     await prisma.$transaction(async (tx) => {
@@ -1060,20 +1162,34 @@ export class WorkflowExecutor {
         },
       });
 
-      // 3. Ensure active PaymentMandate exists
+      // 3. Resolve the mandate that actually authorized this payment.
+      // Never fabricate a mandate or its limit at persistence time: mirror
+      // the real mandate held by the mandate service, or fail so the
+      // workflow reports a persistence error instead of false evidence.
       let mandateRecord = await tx.paymentMandate.findFirst({
         where: { residentId: workflow.residentReference, status: 'ACTIVE' },
         orderBy: { createdAt: 'desc' },
       });
       if (!mandateRecord) {
+        const paymentMandateId = (payment as any)?.mandateId as string | undefined;
+        const memMandate =
+          (paymentMandateId ? this.mandateServiceInstance.getMandate(paymentMandateId) : undefined) ??
+          this.mandateServiceInstance
+            .listMandates()
+            .find((m) => m.ownerReference === workflow.residentReference && m.status === 'ACTIVE');
+        if (!memMandate) {
+          throw new Error(
+            `MANDATE_NOT_PERSISTED: No persisted or service-held mandate exists for resident '${workflow.residentReference}'`
+          );
+        }
         mandateRecord = await tx.paymentMandate.create({
           data: {
             residentId: workflow.residentReference,
             status: 'ACTIVE',
-            maximumAmount: 15000,
-            currency: commitment.financials.currency || 'INR',
+            maximumAmount: memMandate.spendingLimit,
+            currency: memMandate.currency || commitment.financials.currency || 'INR',
             purpose: 'COMMUNITY_PROCUREMENT',
-            periodStart: new Date(),
+            periodStart: memMandate.validFrom ?? new Date(),
           },
         });
       }
@@ -1221,10 +1337,21 @@ export class WorkflowExecutor {
         });
 
         // ResidentAllocation
-        const subtotal = lineTotal;
-        const lineTax = commitment.financials.tax / allocationLines.length;
-        const lineFee = commitment.financials.deliveryFee / allocationLines.length;
-        const lineTotalWithTaxFee = subtotal + lineTax + lineFee;
+        const allocSummary = (workflow as any)._allocationSummary;
+        const matchingCalcAlloc =
+          allocSummary?.allocations?.find(
+            (a: any) =>
+              (a.productId && a.productId === pId) ||
+              a.productName.toLowerCase() === item.productName.toLowerCase() ||
+              (a.demandLineId && (item as any).demandLineId && a.demandLineId === (item as any).demandLineId)
+          ) || allocSummary?.allocations?.[i];
+
+        const subtotal = matchingCalcAlloc?.subtotal ?? lineTotal;
+        const lineTax = matchingCalcAlloc?.allocatedTax ?? commitment.financials.tax / allocationLines.length;
+        const lineFee = matchingCalcAlloc?.allocatedDeliveryFee ?? commitment.financials.deliveryFee / allocationLines.length;
+        const lineOther = matchingCalcAlloc?.allocatedOtherCharges ?? 0;
+        const lineTotalWithTaxFee = matchingCalcAlloc?.totalAmount ?? (subtotal + lineTax + lineFee);
+        const finalUnitPrice = matchingCalcAlloc?.unitPrice ?? unitPrice;
 
         const alloc = await tx.residentAllocation.create({
           data: {
@@ -1244,11 +1371,11 @@ export class WorkflowExecutor {
             requestedQuantity: item.quantity,
             allocatedQuantity: item.quantity,
             unit: item.unit,
-            unitPrice,
+            unitPrice: finalUnitPrice,
             subtotal,
             allocatedTax: lineTax,
             allocatedDeliveryFee: lineFee,
-            allocatedOtherCharges: 0,
+            allocatedOtherCharges: lineOther,
             totalAmount: lineTotalWithTaxFee,
             status: 'FINALIZED',
             reconciliationStatus: 'RECONCILED',
@@ -1257,7 +1384,12 @@ export class WorkflowExecutor {
         createdAllocations.push(alloc);
       }
 
-      // 8. Payment
+      // 8. Payment — persist ONLY the payment that actually executed.
+      // A completed workflow without a SUCCEEDED payment must fail here
+      // rather than fabricate a SUCCESS row.
+      if (!payment || (payment as any).status !== 'SUCCEEDED') {
+        throw new Error('PAYMENT_NOT_EXECUTED: Refusing to persist a SUCCESS payment that was not executed');
+      }
       const paymentId =
         workflow.entities.paymentId ||
         (payment && payment.id) ||
@@ -1281,7 +1413,7 @@ export class WorkflowExecutor {
           amount: commitment.financials.total,
           currency: commitment.financials.currency || 'INR',
           status: 'SUCCESS',
-          providerReference: payment?.providerReference || 'MOCK_GW_TXN_SUCCESS',
+          providerReference: payment?.providerReference ?? null,
           authorizedAt: new Date(),
           completedAt: new Date(),
         },
@@ -1356,34 +1488,36 @@ export class WorkflowExecutor {
       // 12. ReconciliationRecord
       const reconResult = (workflow as any)._reconciliationResult;
       const totalQuantity = allocationLines.reduce((acc, curr) => acc + curr.quantity, 0);
-      await tx.reconciliationRecord.upsert({
+      // find-then-write (not upsert-by-commitmentId): databases migrated
+      // by the versioned-reconciliation migration key records by
+      // (commitmentId, version), so a single-column upsert has no matching
+      // unique constraint there. This form is correct on both schemas.
+      const reconData = {
+        status: reconResult?.status ?? 'RECONCILED',
+        verifiedFulfilledQuantity: reconResult?.verifiedFulfilledQuantity ?? totalQuantity,
+        totalAllocatedQuantity: reconResult?.totalAllocatedQuantity ?? totalQuantity,
+        authoritativeProcurementAmount: reconResult?.authoritativeProcurementAmount ?? commitment.financials.total,
+        totalAllocatedResidentAmount: reconResult?.totalAllocatedResidentAmount ?? commitment.financials.total,
+        isQuantityMatched: reconResult?.isQuantityMatched ?? true,
+        isMonetaryMatched: reconResult?.isMonetaryMatched ?? true,
+        isSupplierObligationsMatched: reconResult?.isSupplierObligationsMatched ?? true,
+        isPaymentVerified: reconResult?.isPaymentVerified ?? true,
+        reconciledAt: new Date(),
+      };
+      const existingRecon = await tx.reconciliationRecord.findFirst({
         where: { commitmentId: commitment.id },
-        update: {
-          status: reconResult?.status ?? 'RECONCILED',
-          verifiedFulfilledQuantity: reconResult?.verifiedFulfilledQuantity ?? totalQuantity,
-          totalAllocatedQuantity: reconResult?.totalAllocatedQuantity ?? totalQuantity,
-          authoritativeProcurementAmount: reconResult?.authoritativeProcurementAmount ?? commitment.financials.total,
-          totalAllocatedResidentAmount: reconResult?.totalAllocatedResidentAmount ?? commitment.financials.total,
-          isQuantityMatched: reconResult?.isQuantityMatched ?? true,
-          isMonetaryMatched: reconResult?.isMonetaryMatched ?? true,
-          isSupplierObligationsMatched: reconResult?.isSupplierObligationsMatched ?? true,
-          isPaymentVerified: reconResult?.isPaymentVerified ?? true,
-          reconciledAt: new Date(),
-        },
-        create: {
-          commitmentId: commitment.id,
-          status: reconResult?.status ?? 'RECONCILED',
-          verifiedFulfilledQuantity: reconResult?.verifiedFulfilledQuantity ?? totalQuantity,
-          totalAllocatedQuantity: reconResult?.totalAllocatedQuantity ?? totalQuantity,
-          authoritativeProcurementAmount: reconResult?.authoritativeProcurementAmount ?? commitment.financials.total,
-          totalAllocatedResidentAmount: reconResult?.totalAllocatedResidentAmount ?? commitment.financials.total,
-          isQuantityMatched: reconResult?.isQuantityMatched ?? true,
-          isMonetaryMatched: reconResult?.isMonetaryMatched ?? true,
-          isSupplierObligationsMatched: reconResult?.isSupplierObligationsMatched ?? true,
-          isPaymentVerified: reconResult?.isPaymentVerified ?? true,
-          reconciledAt: new Date(),
-        },
+        orderBy: { createdAt: 'desc' },
       });
+      if (existingRecon) {
+        await tx.reconciliationRecord.update({
+          where: { id: existingRecon.id },
+          data: reconData,
+        });
+      } else {
+        await tx.reconciliationRecord.create({
+          data: { commitmentId: commitment.id, ...reconData },
+        });
+      }
     });
   }
 

@@ -485,11 +485,14 @@ export class RelayOrchestrator {
     return DEFAULT_STAGES.map((s, idx) => {
       let status: 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' = 'PENDING';
 
-      if (workflow.status === 'COMPLETED') {
+      const existingStage = workflow.stages?.find((item) => item.stage === s.stage);
+      if (existingStage && (existingStage.status === 'COMPLETED' || existingStage.status === 'FAILED')) {
+        status = existingStage.status;
+      } else if (workflow.status === 'COMPLETED') {
         status = 'COMPLETED';
       } else if (
         (workflow.status === 'FAILED' || workflow.status === 'BLOCKED') &&
-        idx === currentStageIdx
+        (idx === currentStageIdx || s.stage === workflow.currentStage)
       ) {
         status = 'FAILED';
       } else if (idx < currentStageIdx) {
@@ -507,7 +510,7 @@ export class RelayOrchestrator {
         stage: s.stage,
         label: s.label,
         status,
-        completedAt: checkpointMap.get(s.stage),
+        completedAt: checkpointMap.get(s.stage) || existingStage?.completedAt,
       };
     });
   }

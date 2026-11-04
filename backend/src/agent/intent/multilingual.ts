@@ -28,23 +28,35 @@ export function normalizeDevanagariNumerals(text: string): string {
 }
 
 /**
- * Normalizes common spoken Hindi and Marathi number words to ASCII numbers.
+ * Normalizes common spoken Hindi, Marathi, and Romanized Hinglish number words to ASCII numbers.
+ * Uses token-aware unicode lookarounds to prevent mutating compound or unrelated words (e.g., "one-time", "dosa", "chocolate").
  */
 const INDIC_NUMBER_WORDS: [RegExp, string][] = [
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:दोनशे|दो सौ|two hundred)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 200 '],
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:शंभर|एक सौ|one hundred)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 100 '],
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:तीनशे|तीन सौ|three hundred)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 300 '],
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:चारशे|चार सौ|four hundred)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 400 '],
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:पाचशे|पांच सौ|five hundred)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 500 '],
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:हजार|thousand)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 1000 '],
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:पन्नास|पचास|fifty)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 50 '],
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:चाळीस|चालीस|forty)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 40 '],
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:तीस|thirty)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 30 '],
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:पंचवीस|पच्चीस|twenty[\s-]?five)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 25 '],
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:वीस|बीस|twenty)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 20 '],
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:पंधरा|पंद्रह|fifteen)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 15 '],
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:दहा|दस|ten)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 10 '],
-  [/(?:^|[^\p{L}\p{M}\p{N}])(?:पाच|पांच|five)(?=$|[^\p{L}\p{M}\p{N}])/gui, ' 5 '],
+  // Hundreds and thousands first
+  [/(?<![\p{L}\p{M}\p{N}-])(?:दोनशे|दो सौ|two hundred)(?![\p{L}\p{M}\p{N}-])/gui, ' 200 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:शंभर|एक सौ|one hundred)(?![\p{L}\p{M}\p{N}-])/gui, ' 100 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:तीनशे|तीन सौ|three hundred)(?![\p{L}\p{M}\p{N}-])/gui, ' 300 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:चारशे|चार सौ|four hundred)(?![\p{L}\p{M}\p{N}-])/gui, ' 400 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:पाचशे|पांच सौ|five hundred)(?![\p{L}\p{M}\p{N}-])/gui, ' 500 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:हजार|thousand)(?![\p{L}\p{M}\p{N}-])/gui, ' 1000 '],
+  // Tens
+  [/(?<![\p{L}\p{M}\p{N}-])(?:पन्नास|पचास|fifty)(?![\p{L}\p{M}\p{N}-])/gui, ' 50 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:चाळीस|चालीस|forty)(?![\p{L}\p{M}\p{N}-])/gui, ' 40 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:तीस|thirty)(?![\p{L}\p{M}\p{N}-])/gui, ' 30 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:पंचवीस|पच्चीस|twenty[\s-]?five)(?![\p{L}\p{M}\p{N}-])/gui, ' 25 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:वीस|बीस|twenty)(?![\p{L}\p{M}\p{N}-])/gui, ' 20 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:पंधरा|पंद्रह|fifteen)(?![\p{L}\p{M}\p{N}-])/gui, ' 15 '],
+  // 1-10 (Devanagari, Romanized Hindi/Hinglish, and English)
+  [/(?<![\p{L}\p{M}\p{N}-])(?:दहा|दस|das|ten)(?![\p{L}\p{M}\p{N}-])/gui, ' 10 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:नऊ|नौ|nau|nine)(?![\p{L}\p{M}\p{N}-])/gui, ' 9 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:आठ|aath|eight)(?![\p{L}\p{M}\p{N}-])/gui, ' 8 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:सात|saat|seven)(?![\p{L}\p{M}\p{N}-])/gui, ' 7 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:सहा|छह|छ|chhe|chheh|che|six)(?![\p{L}\p{M}\p{N}-])/gui, ' 6 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:पाच|पांच|paanch|panch|five)(?![\p{L}\p{M}\p{N}-])/gui, ' 5 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:चार|chaar|char|four)(?![\p{L}\p{M}\p{N}-])/gui, ' 4 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:तीन|teen|three)(?![\p{L}\p{M}\p{N}-])/gui, ' 3 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:दोन|दो|do|two)(?![\p{L}\p{M}\p{N}-])/gui, ' 2 '],
+  [/(?<![\p{L}\p{M}\p{N}-])(?:एक|ek|one)(?![\p{L}\p{M}\p{N}-])/gui, ' 1 '],
 ];
 
 export function normalizeIndicNumberWords(text: string): string {

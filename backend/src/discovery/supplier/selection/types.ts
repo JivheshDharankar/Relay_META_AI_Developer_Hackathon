@@ -144,6 +144,27 @@ export interface SupplierAllocation {
 }
 
 /**
+ * Product-specific line item preserved on a Procurement Commitment.
+ * Ensures multi-product requests retain individual product identity,
+ * units, and quantities without collapsing or cross-unit summation.
+ */
+export interface CommitmentLineItem {
+  lineNumber: number;
+  productId?: string | null;
+  productName: string;
+  sku?: string | null;
+  requestedQuantity: number;
+  unit: string;
+  committedQuantity: number;
+  unitPrice?: number;
+  lineSubtotal?: number;
+  supplierConfirmedQuantity?: number;
+  fulfilledQuantity?: number;
+  allocatedQuantity?: number;
+  identitySource?: 'catalog' | 'open-world';
+}
+
+/**
  * Core Procurement Commitment domain entity representing un-paid binding procurement intent.
  */
 export interface ProcurementCommitment {
@@ -152,6 +173,8 @@ export interface ProcurementCommitment {
   societyId?: string;
   selectedQuoteIds: string[];
   supplierIds: string[];
+  /** Authoritative product-specific line items for multi-item and single-item baskets. */
+  items?: CommitmentLineItem[];
   product: {
     productId?: string;
     productName: string;
@@ -193,6 +216,8 @@ export interface ProcurementCommitment {
  */
 export interface PurchaseOrderLine {
   lineNumber: number;
+  productId?: string;
+  sku?: string;
   productName: string;
   quantity: number;
   unit: string;

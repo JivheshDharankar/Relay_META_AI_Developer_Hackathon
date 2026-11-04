@@ -8,6 +8,7 @@ export * from './GoogleAuthProvider';
 export * from './EmailPhoneAuthProvider';
 export * from './sms/types';
 export * from './sms/TwilioSmsProvider';
+export * from './sms/TwilioVerifyProvider';
 export * from './sms/MockSmsProvider';
 export * from './sms/SmsService';
 export * from './email/EmailService';

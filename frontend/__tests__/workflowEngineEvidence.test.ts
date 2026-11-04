@@ -592,9 +592,10 @@ describe('Final polish — multi-item lines, provenance, negotiated winner', () 
       { productName: 'rice', quantity: 2, unit: 'kg' },
       { productName: 'wheat', quantity: 3, unit: 'kg' },
     ]);
-    // Legacy single fields preserved (primary line + summed quantity).
-    expect(intent.productName).toBe('rice');
-    expect(intent.quantity).toBe(5);
+    // Canonical multi-item behavior: items list preserved, joined product names, and scalar quantity is null to prevent heterogeneous summing
+    expect(intent.productName).toBe('rice, wheat');
+    expect(intent.quantity).toBeNull();
+    expect(intent.unit).toBe('mixed');
   });
 
   it('Stage 01 summary lists every line instead of merging them', () => {

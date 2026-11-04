@@ -74,8 +74,24 @@ export class EmailPhoneAuthProvider implements AuthProvider {
       const emailRes = await emailService.sendOtpEmail(trimmed, code);
       if (emailRes.messageId) messageId = emailRes.messageId;
     } else {
-      const smsRes = await smsService.sendOtp(trimmed, code);
-      if (smsRes.messageId) messageId = smsRes.messageId;
+      if (smsService.isTwilioSelected) {
+        // STRICT REQUIREMENT: Fail closed if Twilio Verify config is missing or invalid.
+        // Never silently fall back to mock.
+        const configCheck = smsService.verifyProvider.validateConfig();
+        if (!configCheck.valid) {
+          throw new Error(`TWILIO_CONFIG_ERROR: ${configCheck.error}`);
+        }
+        const verifyRes = await smsService.verifyProvider.sendVerification(trimmed);
+        if (!verifyRes.success) {
+          const err = new Error(verifyRes.errorMessage || 'Twilio Verify dispatch failed');
+          (err as any).code = verifyRes.errorCode || 'TWILIO_DISPATCH_FAILED';
+          throw err;
+        }
+        messageId = verifyRes.messageId;
+      } else {
+        const smsRes = await smsService.sendOtp(trimmed, code);
+        if (smsRes.messageId) messageId = smsRes.messageId;
+      }
     }
 
     return {
@@ -120,48 +136,98 @@ export class EmailPhoneAuthProvider implements AuthProvider {
       };
     }
 
-    const stored = this.otpStore.get(destination);
+    const isPhone = !destination.includes('@');
 
-    if (!stored) {
-      return {
-        success: false,
-        errorCode: 'OTP_NOT_FOUND',
-        errorMessage: 'No active OTP found for this destination. Request a new OTP.',
-      };
-    }
+    // Branch A: Twilio Verify Path for Phone Authentication
+    if (isPhone && smsService.isTwilioSelected) {
+      // 1. Fail closed on missing/invalid Twilio configuration
+      const configCheck = smsService.verifyProvider.validateConfig();
+      if (!configCheck.valid) {
+        return {
+          success: false,
+          errorCode: 'TWILIO_UNCONFIGURED',
+          errorMessage: configCheck.error || 'Twilio Verify is not properly configured.',
+        };
+      }
 
-    if (stored.expiresAt.getTime() < Date.now()) {
-      this.otpStore.delete(destination);
-      return {
-        success: false,
-        errorCode: 'OTP_EXPIRED',
-        errorMessage: 'OTP has expired. Please request a new one.',
-      };
-    }
-
-    // Standard dev/test mode OTP check (allows 123456 for test fixtures when OTP exists)
-    const isTestOtp =
-      process.env.NODE_ENV !== 'production' && credentials.otpCode === '123456';
-
-    if (stored.code !== credentials.otpCode && !isTestOtp) {
-      stored.attempts += 1;
-      if (stored.attempts >= this.maxAttempts) {
-        this.otpStore.delete(destination);
+      // 2. Local abuse / max attempts check
+      const stored = this.otpStore.get(destination);
+      if (stored && stored.attempts >= this.maxAttempts) {
         return {
           success: false,
           errorCode: 'MAX_OTP_ATTEMPTS_EXCEEDED',
           errorMessage: 'Too many incorrect attempts. This OTP is invalidated.',
         };
       }
-      return {
-        success: false,
-        errorCode: 'INVALID_OTP',
-        errorMessage: `Incorrect OTP code. ${this.maxAttempts - stored.attempts} attempts remaining.`,
-      };
-    }
 
-    // Valid OTP consumed: immediately delete to prevent reuse
-    this.otpStore.delete(destination);
+      // 3. STRICT REQUIREMENT: Development OTP '123456' bypass is STRICTLY DISABLED when Twilio is active.
+      // Every code must be authoritatively verified by Twilio VerificationCheck.
+      const verifyRes = await smsService.verifyProvider.checkVerification(destination, credentials.otpCode);
+      if (!verifyRes.success) {
+        if (stored) {
+          stored.attempts += 1;
+          if (stored.attempts >= this.maxAttempts) {
+            return {
+              success: false,
+              errorCode: 'MAX_OTP_ATTEMPTS_EXCEEDED',
+              errorMessage: 'Too many incorrect attempts. This OTP is invalidated.',
+            };
+          }
+        }
+        return {
+          success: false,
+          errorCode: verifyRes.errorCode || 'INVALID_OTP',
+          errorMessage: verifyRes.errorMessage || 'Invalid OTP code',
+        };
+      }
+
+      // Successfully verified by Twilio
+      this.otpStore.delete(destination);
+    } else {
+      // Branch B: Standard In-Memory / Mock OTP Path (Email & Mock SMS)
+      const stored = this.otpStore.get(destination);
+
+      if (!stored) {
+        return {
+          success: false,
+          errorCode: 'OTP_NOT_FOUND',
+          errorMessage: 'No active OTP found for this destination. Request a new OTP.',
+        };
+      }
+
+      if (stored.expiresAt.getTime() < Date.now()) {
+        this.otpStore.delete(destination);
+        return {
+          success: false,
+          errorCode: 'OTP_EXPIRED',
+          errorMessage: 'OTP has expired. Please request a new one.',
+        };
+      }
+
+      // Standard dev/test mode OTP check (allows 123456 for test fixtures when mock is active)
+      const isTestOtp =
+        process.env.NODE_ENV !== 'production' && credentials.otpCode === '123456';
+
+      if (stored.code !== credentials.otpCode && !isTestOtp) {
+        stored.attempts += 1;
+        if (stored.attempts >= this.maxAttempts) {
+          this.otpStore.delete(destination);
+          return {
+            success: false,
+            errorCode: 'MAX_OTP_ATTEMPTS_EXCEEDED',
+            errorMessage: 'Too many incorrect attempts. This OTP is invalidated.',
+          };
+        }
+        return {
+          success: false,
+          errorCode: 'INVALID_OTP',
+          errorMessage: `Incorrect OTP code. ${this.maxAttempts - stored.attempts} attempts remaining.`,
+        };
+      }
+
+      // Valid OTP consumed: immediately delete to prevent reuse
+      this.otpStore.delete(destination);
+    }
 
     const isEmail = destination.includes('@');
     const providerAccountId = `ep_${destination.replace(/[^a-zA-Z0-9]/g, '_')}`;

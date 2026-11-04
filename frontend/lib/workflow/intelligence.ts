@@ -29,7 +29,12 @@ export function getRunIntelligence(run: ProcurementRun): IntelligenceNote[] {
   const intent = getIntentEvidence(run);
   if (intent) {
     const lines: string[] = [];
-    if (intent.productName && intent.quantity !== null) {
+    if (intent.items && intent.items.length > 1) {
+      const itemSummaries = intent.items.map(
+        (it) => `${it.quantity !== null ? formatQuantity(it.quantity, it.unit ?? undefined) : ''} ${it.productName}`.trim()
+      );
+      lines.push(`${itemSummaries.join(', ')} identified from your request.`);
+    } else if (intent.productName && intent.quantity !== null) {
       lines.push(
         `${formatQuantity(intent.quantity, intent.unit ?? undefined)} ${intent.productName} identified from your request.`
       );
@@ -95,6 +100,9 @@ export function getRunIntelligence(run: ProcurementRun): IntelligenceNote[] {
     if (quotes.selectedSupplierName) {
       lines.push(`${quotes.selectedSupplierName} is the strongest eligible candidate.`);
     }
+    if (quotes.commercialBasisSimulated) {
+      lines.push('Commercial basis: simulated supplier quotes for local demonstration.');
+    }
     notes.push({ stage: 'SELECT', title: 'Quote interpretation', lines });
   }
 
@@ -111,12 +119,16 @@ export function getRunIntelligence(run: ProcurementRun): IntelligenceNote[] {
 
   const commitment = getCommitmentEvidence(run);
   if (commitment && commitment.totalAmount !== null) {
+    const lines = [
+      `Purchase commitment locked at ${formatMoney(commitment.totalAmount)} — Relay validates the exact amount.`,
+    ];
+    if (commitment.commercialBasisSimulated) {
+      lines.push('Commercial terms based on simulated supplier responses for hackathon demo.');
+    }
     notes.push({
       stage: 'COMMIT',
       title: 'Commitment',
-      lines: [
-        `Purchase commitment locked at ${formatMoney(commitment.totalAmount)} — Relay validates the exact amount.`,
-      ],
+      lines,
     });
   }
 

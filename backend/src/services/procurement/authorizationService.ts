@@ -112,6 +112,32 @@ export class AuthorizationService {
       return result;
     }
 
+    // 6. Cumulative committed spend: completed payments plus in-flight
+    // reservations (PENDING/AUTHORIZED/PROCESSING) already consume mandate
+    // capacity. The new request must fit in what remains — a per-transaction
+    // check alone would allow unlimited overspend in small increments.
+    const committed = await prisma.payment.aggregate({
+      _sum: { amount: true },
+      where: {
+        paymentMandateId: mandate.id,
+        status: { in: ['SUCCESS', 'PENDING', 'AUTHORIZED', 'PROCESSING'] },
+      },
+    });
+    const committedAmount = toDecimal(committed._sum.amount ?? 0);
+    const projectedTotal = committedAmount.plus(requestedDecimal);
+    if (!isLessThanOrEqual(projectedTotal, mandate.maximumAmount)) {
+      const result: AuthorizationResult = {
+        authorized: false,
+        code: 'REJECTED',
+        mandateId: mandate.id,
+        maxAuthorizedAmount: mandate.maximumAmount,
+        requestedAmount: requestedDecimal,
+        reason: `MANDATE_CUMULATIVE_LIMIT_EXCEEDED (Committed ₹${committedAmount} + requested ₹${requestedDecimal} exceeds ceiling ₹${mandate.maximumAmount})`,
+      };
+      await this.recordAudit(input.residentId, result);
+      return result;
+    }
+
     // Authorization success
     const result: AuthorizationResult = {
       authorized: true,

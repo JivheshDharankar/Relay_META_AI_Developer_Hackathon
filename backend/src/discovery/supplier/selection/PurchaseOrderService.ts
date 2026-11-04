@@ -93,7 +93,7 @@ export class PurchaseOrderService {
         currency: 'INR',
         deliveryDeadline: commitment.deliveryDeadline,
         deliveryArea: rfq.deliveryArea, // Society/area level only (no flat number)
-        terms: 'Payment due on delivery receipt and physical reconciliation.',
+        terms: 'Pre-authorized via resident mandate; settled upon delivery verification and reconciliation.',
         status: 'READY_FOR_PAYMENT',
         createdAt: now,
         updatedAt: now,

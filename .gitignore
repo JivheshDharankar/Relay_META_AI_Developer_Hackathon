@@ -42,6 +42,8 @@ Thumbs.db
 # Temporary files & uploads
 uploads/tmp/
 tmp/
+RELAY_REMAINING_PAGE_EVIDENCE/
+*.tsbuildinfo
 
 # Certificates & Keys
 *.pem

@@ -6,7 +6,8 @@ export type PaymentStatus =
   | 'FAILED'
   | 'RETRYING'
   | 'REJECTED'
-  | 'CANCELLED';
+  | 'CANCELLED'
+  | 'REFUNDED';
 
 export class PaymentStateMachineError extends Error {
   constructor(
@@ -28,9 +29,10 @@ const LEGAL_TRANSITIONS: Record<PaymentStatus, PaymentStatus[]> = {
   PROCESSING: ['SUCCEEDED', 'FAILED'],
   FAILED: ['RETRYING', 'CANCELLED'],
   RETRYING: ['PROCESSING', 'FAILED', 'CANCELLED'],
-  SUCCEEDED: [], // Terminal
+  SUCCEEDED: ['REFUNDED'], // Refund is the only exit from a settled payment
   REJECTED: [],  // Terminal
   CANCELLED: [], // Terminal
+  REFUNDED: [],  // Terminal
 };
 
 /**

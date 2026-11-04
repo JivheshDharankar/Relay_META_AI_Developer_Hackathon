@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { RelayOrchestrator } from '../src/orchestration/RelayOrchestrator';
 import { workflowPersistenceService } from '../src/orchestration/WorkflowPersistenceService';
 import { prisma } from '../src/config/prisma';
+import { mandateService } from '../src/payment/mandate/MandateService';
 
 const direct = new PrismaClient();
 const createdWorkflowIds: string[] = [];
@@ -62,10 +63,18 @@ describe('Workflow durable persistence (§2 mission persistence)', () => {
   });
 
   it('2b. the autonomous loop persists the terminal row (not just single steps)', async () => {
+    // Real mandate fixture: PAY never auto-creates consent.
+    mandateService.createMandate({
+      ownerReference: 'res_persist_2b',
+      purpose: 'COMMUNITY_PROCUREMENT',
+      spendingLimit: 1000000,
+      currency: 'INR',
+    });
     const orchestrator = new RelayOrchestrator();
     const wf = await orchestrator.startWorkflow({
       requestText: '5 Dairy Milk',
       location: { latitude: 18.5204, longitude: 73.8567 },
+      residentReference: 'res_persist_2b',
     });
     createdWorkflowIds.push(wf.id);
     expect(wf.status).toBe('COMPLETED');

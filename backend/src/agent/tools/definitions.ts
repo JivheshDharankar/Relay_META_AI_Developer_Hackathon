@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RelayTool } from './types';
+import { RelayTool, ToolExecutionContext } from './types';
 import { ToolExecutionError } from './registry';
 import {
   requireCommitmentSociety,
@@ -57,6 +57,57 @@ import { relayOrchestrator } from '../../orchestration';
 import type { RelayWorkflow } from '../../orchestration/types';
 import { OPERATIONAL_SLA_HOURS } from '../../orchestration/sla';
 import { resolveWorkflowRequest } from '../intent/resolveWorkflowItems';
+
+/**
+ * Ownership guard for community-order-scoped tools. The community order is
+ * loaded from the database and must belong to the execution context's
+ * society; a bare model-supplied ID is never sufficient authority.
+ * Model-driven execution always carries a context (RelayAgent supplies
+ * it); context-free in-process harness calls fall through to the service
+ * layer, which performs its own validation.
+ */
+async function requireCommunityOrderAccess(
+  ctx: ToolExecutionContext | undefined,
+  communityOrderId: string,
+  toolName: string,
+): Promise<void> {
+  if (!ctx || !ctx.residentId) return;
+  const context = ctx;
+  const order = await prisma.communityOrder.findUnique({
+    where: { id: communityOrderId },
+    select: { societyId: true },
+  });
+  if (!order) {
+    throw new ToolExecutionError(
+      'COMMUNITY_ORDER_NOT_FOUND',
+      `Tool '${toolName}' rejected: community order '${communityOrderId}' does not exist.`
+    );
+  }
+  if (order.societyId !== context.societyId) {
+    throw new ToolExecutionError(
+      'CROSS_SOCIETY_ACCESS_DENIED',
+      `Tool '${toolName}' rejected: community order belongs to another society.`
+    );
+  }
+}
+
+/**
+ * Ownership guard for RFQ-scoped tools (in-memory discovery stack). RFQs
+ * created through createRFQ carry the creating society; access from another
+ * society is denied. Legacy RFQs without a society binding fall through to
+ * the service layer, matching requireCommitmentSociety semantics.
+ */
+function requireRfqAccess(
+  ctx: ToolExecutionContext | undefined,
+  rfqId: string,
+  toolName: string,
+): void {
+  if (!ctx || !ctx.residentId) return;
+  const rfq = rfqService.getRFQ(rfqId);
+  if (rfq) {
+    requireCommitmentSociety(ctx, rfq.societyId, toolName);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 1. CREATE REQUEST TOOL
@@ -638,7 +689,8 @@ export const allocateResidentOrdersTool: RelayTool = {
       },
     };
   },
-  async execute(args) {
+  async execute(args, ctx) {
+    await requireCommunityOrderAccess(ctx, args.communityOrderId, 'allocateResidentOrders');
     const delivery = await allocationService.allocateCommunityDelivery({
       communityOrderId: args.communityOrderId,
       allocations: args.allocations,
@@ -675,7 +727,8 @@ export const reconcileOrderTool: RelayTool = {
       },
     };
   },
-  async execute(args) {
+  async execute(args, ctx) {
+    await requireCommunityOrderAccess(ctx, args.communityOrderId, 'reconcileOrder');
     const report = await reconciliationService.reconcileCommunityOrder(args.communityOrderId);
 
     return {
@@ -768,7 +821,8 @@ export const trackDeliveryTool: RelayTool = {
       },
     };
   },
-  async execute(args) {
+  async execute(args, ctx) {
+    await requireCommunityOrderAccess(ctx, args.communityOrderId, 'trackDelivery');
     if (args.advanceStatus) {
       if (args.advanceStatus === 'DELIVERED') {
         // Deterministically progress delivery through required FSM sequence to terminal state
@@ -1016,7 +1070,8 @@ export const sendRFQTool: RelayTool = {
       },
     };
   },
-  async execute(args) {
+  async execute(args, ctx) {
+    requireRfqAccess(ctx, args.rfqId, 'sendRFQ');
     const result = await rfqService.sendRFQ(args.rfqId, {
       preferredProvider: args.preferredProvider,
       idempotencyKey: args.idempotencyKey,
@@ -1064,7 +1119,8 @@ export const getQuotesForRFQTool: RelayTool = {
       },
     };
   },
-  async execute(args) {
+  async execute(args, ctx) {
+    requireRfqAccess(ctx, args.rfqId, 'getQuotesForRFQ');
     const quotes = quoteNormalizationService.getQuotesForRFQ(
       args.rfqId,
       args.statusFilter as QuoteStatus | undefined
@@ -1122,11 +1178,12 @@ export const getQuoteTool: RelayTool = {
       },
     };
   },
-  async execute(args) {
+  async execute(args, ctx) {
     const quote = quoteNormalizationService.getQuote(args.quoteId);
     if (!quote) {
       throw new Error(`Quote '${args.quoteId}' not found`);
     }
+    requireRfqAccess(ctx, quote.rfqId, 'getQuote');
 
     return {
       success: true,
@@ -1177,7 +1234,8 @@ export const compareQuotesForRFQTool: RelayTool = {
       },
     };
   },
-  async execute(args) {
+  async execute(args, ctx) {
+    requireRfqAccess(ctx, args.rfqId, 'compareQuotesForRFQ');
     const comparison = negotiationService.compareQuotesForRFQ(args.rfqId);
     return {
       success: true,
@@ -1211,15 +1269,17 @@ export const getNegotiationStateTool: RelayTool = {
       },
     };
   },
-  async execute(args) {
+  async execute(args, ctx) {
     if (args.negotiationId) {
       const negotiation = negotiationService.getNegotiation(args.negotiationId);
       if (!negotiation) {
         throw new Error(`Negotiation '${args.negotiationId}' not found`);
       }
+      requireRfqAccess(ctx, negotiation.rfqId, 'getNegotiationState');
       return { success: true, negotiation };
     }
     if (args.rfqId) {
+      requireRfqAccess(ctx, args.rfqId, 'getNegotiationState');
       const list = negotiationService.getNegotiationsForRFQ(args.rfqId);
       return { success: true, count: list.length, negotiations: list };
     }
@@ -2415,7 +2475,7 @@ export function buildCommercialEvidence(workflow: RelayWorkflow): {
   selection: Record<string, unknown> | null;
 } {
   const receivedIds = workflow.entities.receivedQuoteIds || [];
-  const quotes = receivedIds
+  let quotes = receivedIds
     .map((id) => quoteNormalizationService.getQuote(id))
     .filter((q): q is NonNullable<typeof q> => Boolean(q))
     .map((quote) => ({
@@ -2430,8 +2490,8 @@ export function buildCommercialEvidence(workflow: RelayWorkflow): {
       otherCharges: quote.otherCharges,
       deliveryCommitment: quote.deliveryCommitment,
       deliveryEtaHours: quote.deliveryEtaHours,
-      confirmedDeliveryEta: quote.confirmedDeliveryEta?.toISOString(),
-      validUntil: quote.validUntil.toISOString(),
+      confirmedDeliveryEta: quote.confirmedDeliveryEta?.toISOString ? quote.confirmedDeliveryEta.toISOString() : (quote.confirmedDeliveryEta as any),
+      validUntil: quote.validUntil?.toISOString ? quote.validUntil.toISOString() : (quote.validUntil as any),
       status: quote.status,
       isSimulated: quote.isSimulated,
       reasons: quote.reasons,
@@ -2439,6 +2499,31 @@ export function buildCommercialEvidence(workflow: RelayWorkflow): {
       totalMismatchDifference: quote.totalMismatchDifference,
       lineItems: quote.lineItems,
     }));
+
+  const rawNormalized = (workflow as { _normalizedQuotes?: Array<Record<string, unknown>> })._normalizedQuotes;
+  if (quotes.length === 0 && Array.isArray(rawNormalized) && rawNormalized.length > 0) {
+    quotes = rawNormalized.map((q: any) => ({
+      id: q.id,
+      rfqId: q.rfqId,
+      supplierName: q.supplierName,
+      candidateId: q.candidateId,
+      total: q.total,
+      subtotal: q.subtotal,
+      deliveryFee: q.deliveryFee,
+      tax: q.tax,
+      otherCharges: q.otherCharges,
+      deliveryCommitment: q.deliveryCommitment,
+      deliveryEtaHours: q.deliveryEtaHours,
+      confirmedDeliveryEta: q.confirmedDeliveryEta?.toISOString ? q.confirmedDeliveryEta.toISOString() : q.confirmedDeliveryEta,
+      validUntil: q.validUntil?.toISOString ? q.validUntil.toISOString() : q.validUntil,
+      status: q.status,
+      isSimulated: q.isSimulated,
+      reasons: q.reasons,
+      hasTotalMismatch: q.hasTotalMismatch,
+      totalMismatchDifference: q.totalMismatchDifference,
+      lineItems: q.lineItems,
+    }));
+  }
 
   let comparison: Record<string, unknown> | null = null;
   const rfq = workflow.entities.rfqId ? rfqService.getRFQ(workflow.entities.rfqId) : undefined;
@@ -2455,6 +2540,30 @@ export function buildCommercialEvidence(workflow: RelayWorkflow): {
       fastestDeliveryQuoteId: summary.fastestDeliveryQuoteId ?? null,
       fullFulfillmentQuoteIds: summary.fullFulfillmentQuoteIds,
     };
+  } else if (Array.isArray(normalized) && normalized.length > 0) {
+    const normList = normalized as Array<Record<string, unknown>>;
+    const selected = (workflow as { _selectedQuote?: Record<string, unknown> })._selectedQuote;
+    const sorted = [...normList].sort((a, b) => Number(a.total) - Number(b.total));
+    const lowest = sorted[0];
+    comparison = {
+      rfqId: workflow.entities.rfqId ?? null,
+      requestedQuantity: Array.isArray((workflow as any).resolvedItems)
+        ? (workflow as any).resolvedItems.reduce((acc: number, it: any) => acc + Number(it.quantity || 0), 0)
+        : null,
+      unit: 'items',
+      quotes: normList.map((q: any) => ({
+        quoteId: q.id,
+        supplierName: q.supplierName,
+        totalPrice: Number(q.total),
+        deliveryEtaHours: q.deliveryEtaHours ?? 12,
+        eligible: q.status === 'VALID',
+        reasons: q.reasons ?? [],
+      })),
+      eligibleQuoteIds: normList.filter((q: any) => q.status === 'VALID').map((q: any) => q.id),
+      lowestCostQuoteId: lowest?.id ?? selected?.id ?? null,
+      fastestDeliveryQuoteId: normList[0]?.id ?? null,
+      fullFulfillmentQuoteIds: normList.map((q: any) => q.id),
+    };
   }
 
   const captured = (workflow as { _negotiationEvidence?: unknown })._negotiationEvidence;
@@ -2466,9 +2575,16 @@ export function buildCommercialEvidence(workflow: RelayWorkflow): {
     ._selectionRecommendation as
     | { decision?: unknown; quoteId?: unknown; reason?: unknown }
     | undefined;
+  const selectedQuote = (workflow as { _selectedQuote?: Record<string, unknown> })._selectedQuote;
   const selection = rec
     ? { decision: rec.decision ?? null, quoteId: rec.quoteId ?? null, reason: rec.reason ?? '' }
-    : null;
+    : selectedQuote
+      ? {
+          decision: 'SELECT',
+          quoteId: selectedQuote.id,
+          reason: `Selected lowest-cost verified quote from ${selectedQuote.supplierName}`,
+        }
+      : null;
 
   return { quotes, comparison, negotiations, selection };
 }
@@ -2493,13 +2609,19 @@ export function buildFinancialEvidence(workflow: RelayWorkflow): {
   fulfillment: Record<string, unknown> | null;
 } {
   const commitmentId = workflow.entities.commitmentId;
-  const commitment = commitmentId
-    ? (procurementCommitmentService.getCommitment(commitmentId) as unknown as Record<string, unknown> | undefined)
-    : undefined;
+  const commitment =
+    (commitmentId
+      ? (procurementCommitmentService.getCommitment(commitmentId) as unknown as Record<string, unknown> | undefined)
+      : undefined) ??
+    ((workflow as { _commitment?: unknown })._commitment as Record<string, unknown> | undefined);
+
   const paymentId = workflow.entities.paymentId;
-  const payment = paymentId
-    ? (paymentService.getPayment(paymentId) as unknown as Record<string, unknown> | undefined)
-    : undefined;
+  const payment =
+    (paymentId
+      ? (paymentService.getPayment(paymentId) as unknown as Record<string, unknown> | undefined)
+      : undefined) ??
+    ((workflow as { _payment?: unknown })._payment as Record<string, unknown> | undefined);
+
   let paymentSummary: Record<string, unknown> | null = null;
   if (commitmentId && commitment) {
     try {
@@ -2510,22 +2632,38 @@ export function buildFinancialEvidence(workflow: RelayWorkflow): {
       paymentSummary = null;
     }
   }
-  const allocation = commitmentId
-    ? ((residentAllocationService.getCommitmentAllocationSummary(
-        commitmentId
-      ) as unknown as Record<string, unknown> | undefined) ?? null)
-    : null;
-  const reconciliation = commitmentId
-    ? ((residentReconciliationService.getReconciliationResult(
-        commitmentId
-      ) as unknown as Record<string, unknown> | undefined) ?? null)
-    : null;
+  if (!paymentSummary && payment) {
+    paymentSummary = {
+      status: payment.status === 'SUCCEEDED' ? 'FULLY_PAID' : payment.status,
+      paidAmount: payment.amount,
+      currency: payment.currency || 'INR',
+    };
+  }
+
+  const allocation =
+    (commitmentId
+      ? ((residentAllocationService.getCommitmentAllocationSummary(
+          commitmentId
+        ) as unknown as Record<string, unknown> | undefined) ?? null)
+      : null) ??
+    (((workflow as { _allocationSummary?: unknown })._allocationSummary as Record<string, unknown> | undefined) ?? null);
+
+  const reconciliation =
+    (commitmentId
+      ? ((residentReconciliationService.getReconciliationResult(
+          commitmentId
+        ) as unknown as Record<string, unknown> | undefined) ?? null)
+      : null) ??
+    (((workflow as { _reconciliationResult?: unknown })._reconciliationResult as Record<string, unknown> | undefined) ?? null);
+
   const fulfillmentId = workflow.entities.fulfillmentOrderIds?.[0];
-  const fulfillment = fulfillmentId
-    ? ((fulfillmentService.getFulfillment(
-        fulfillmentId
-      ) as unknown as Record<string, unknown> | undefined) ?? null)
-    : null;
+  const fulfillment =
+    (fulfillmentId
+      ? ((fulfillmentService.getFulfillment(
+          fulfillmentId
+        ) as unknown as Record<string, unknown> | undefined) ?? null)
+      : null) ??
+    (((workflow as { _fulfillmentOrder?: unknown })._fulfillmentOrder as Record<string, unknown> | undefined) ?? null);
 
   return {
     commitment: commitment ?? null,
@@ -2611,8 +2749,9 @@ export const startWorkflowTool: RelayTool = {
     // reaches the agent loop — same precedent as identity binding above.
     const resolved = await resolveWorkflowRequest(args.requestText);
     const resolvedItems = resolved.items;
+    let workflow: RelayWorkflow | undefined;
     try {
-      const workflow = await relayOrchestrator.startWorkflow({
+      workflow = await relayOrchestrator.createWorkflow({
         requestText: args.requestText,
         residentReference: args.residentReference,
         societyReference: args.societyReference,
@@ -2634,17 +2773,20 @@ export const startWorkflowTool: RelayTool = {
           latitude: args.latitude ?? 18.5204,
           longitude: args.longitude ?? 73.8567,
         },
+        metadata: { ...(ctx?.metadata || {}), runId: ctx?.runId },
         idempotencyKey: args.idempotencyKey,
       });
 
+      const completedWf = await relayOrchestrator.executeWorkflow(workflow.id);
+
       const payload = {
-        workflowId: workflow.id,
-        status: workflow.status,
-        currentStage: workflow.currentStage,
-        version: workflow.workflowVersion,
-        commercial: buildCommercialEvidence(workflow),
-        financialProof: buildFinancialEvidence(workflow),
-        sla: buildSlaEvidence(workflow),
+        workflowId: completedWf.id,
+        status: completedWf.status,
+        currentStage: completedWf.currentStage,
+        version: completedWf.workflowVersion,
+        commercial: buildCommercialEvidence(completedWf),
+        financialProof: buildFinancialEvidence(completedWf),
+        sla: buildSlaEvidence(completedWf),
       };
 
       return {
@@ -2653,9 +2795,19 @@ export const startWorkflowTool: RelayTool = {
         ...payload,
       };
     } catch (err: any) {
+      const activeWf = workflow ? (relayOrchestrator.getWorkflow(workflow.id) || workflow) : undefined;
+      const progress = activeWf ? relayOrchestrator.getWorkflowProgress(activeWf.id) : undefined;
       return {
         success: false,
         error: err.message || String(err),
+        ...(activeWf ? {
+          workflowId: activeWf.id,
+          status: activeWf.status,
+          currentStage: activeWf.currentStage,
+          failureReason: activeWf.failureReason || err.message,
+          progress,
+          stages: activeWf.stages,
+        } : {}),
       };
     }
   },

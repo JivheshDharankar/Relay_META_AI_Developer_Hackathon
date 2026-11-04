@@ -10,6 +10,9 @@ export const DEFAULT_RATE_POLICIES: Record<string, RateLimitPolicy> = {
   PROFILE_MUTATION: { maxRequests: 10, windowSeconds: 60 },
   ONBOARDING_MUTATION: { maxRequests: 15, windowSeconds: 60 },
   SENSITIVE_API: { maxRequests: 20, windowSeconds: 60 },
+  AGENT_RUN: { maxRequests: 30, windowSeconds: 60 },
+  PAYMENT_EXECUTION: { maxRequests: 60, windowSeconds: 60 },
+  PROCUREMENT_MUTATION: { maxRequests: 60, windowSeconds: 60 },
 };
 
 export interface RateLimitResult {
