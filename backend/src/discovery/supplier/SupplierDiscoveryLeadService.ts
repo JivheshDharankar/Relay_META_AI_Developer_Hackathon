@@ -29,7 +29,7 @@ export class SupplierDiscoveryLeadService {
         pricingVerified: false,
       } as Prisma.InputJsonValue;
 
-      await prisma.supplierDiscoveryLead.upsert({
+      const lead = await prisma.supplierDiscoveryLead.upsert({
         where: { source_sourceExternalId: { source, sourceExternalId: candidate.id } },
         create: {
           source,
@@ -49,7 +49,6 @@ export class SupplierDiscoveryLeadService {
           categories,
           firstDiscoveredAt: observedAt,
           lastDiscoveredAt: observedAt,
-          rawEvidence,
         },
         update: {
           name: candidate.name,
@@ -67,6 +66,35 @@ export class SupplierDiscoveryLeadService {
           categories,
           lastDiscoveredAt: observedAt,
           rawEvidence,
+        },
+      });
+
+      await prisma.supplierDiscoveryObservation.create({
+        data: {
+          discoveryLeadId: lead.id,
+          source,
+          sourceExternalId: candidate.id,
+          observedAt,
+          normalizedSnapshot: {
+            name: candidate.name,
+            formattedAddress: candidate.formattedAddress,
+            street: candidate.street ?? null,
+            city: candidate.city ?? null,
+            state: candidate.state ?? null,
+            postalCode: candidate.postalCode ?? null,
+            country: candidate.country ?? null,
+            latitude: candidate.latitude,
+            longitude: candidate.longitude,
+            categories,
+            phone: candidate.phone ?? null,
+            email: candidate.email ?? null,
+            website: candidate.website ?? null,
+            discoveryOnly: true,
+            supplierIdentityVerified: false,
+            productAvailabilityVerified: false,
+            pricingVerified: false,
+          },
+          rawPayload: rawEvidence,
         },
       });
       processed += 1;
