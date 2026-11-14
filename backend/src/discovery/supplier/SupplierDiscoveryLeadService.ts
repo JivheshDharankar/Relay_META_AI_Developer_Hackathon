@@ -49,6 +49,7 @@ export class SupplierDiscoveryLeadService {
           categories,
           firstDiscoveredAt: observedAt,
           lastDiscoveredAt: observedAt,
+          rawEvidence,
         },
         update: {
           name: candidate.name,
@@ -65,7 +66,6 @@ export class SupplierDiscoveryLeadService {
           website: candidate.website,
           categories,
           lastDiscoveredAt: observedAt,
-          rawEvidence,
         },
       });
 
