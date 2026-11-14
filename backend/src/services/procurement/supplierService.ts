@@ -5,14 +5,13 @@ import {
   isLessThan,
   toDecimal,
 } from '../../domain/procurement';
-import { AuditEventType, SupplierStatus, Prisma } from '@prisma/client';
+import { AuditEventType, EvidenceVerificationStatus, SupplierEvidenceType, SupplierStatus, SupplierVerificationStatus, Prisma } from '@prisma/client';
 
 export interface SupplierFilterInput {
   societyId: string;
   productId: string;
   requestedQuantity: Prisma.Decimal | number | string;
   maxSlaHours?: number; // Defaults to Relay 12-hour SLA invariant
-  overrideDeliveryHours?: Record<string, number>; // Supplier estimated turnaround
 }
 
 export class SupplierService {
@@ -43,6 +42,17 @@ export class SupplierService {
         products: {
           where: { productId: input.productId },
         },
+        verificationEvidence: {
+          where: {
+            evidenceType: SupplierEvidenceType.DELIVERY_CAPABILITY,
+            status: EvidenceVerificationStatus.VERIFIED,
+            verifiedAt: { not: null },
+            verifiedDeliveryHours: { not: null },
+            OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+          },
+          orderBy: { verifiedAt: 'desc' },
+          take: 1,
+        },
       },
     });
 
@@ -55,7 +65,7 @@ export class SupplierService {
       if (s.status !== SupplierStatus.ACTIVE) {
         reasons.push('SUPPLIER_INACTIVE');
       }
-      if (s.verificationStatus !== 'VERIFIED') {
+      if (s.verificationStatus !== SupplierVerificationStatus.VERIFIED) {
         reasons.push('SUPPLIER_NOT_VERIFIED');
       }
 
@@ -79,13 +89,14 @@ export class SupplierService {
 
       // 4. Delivery SLA must come from an explicit, verified supplier commitment.
       // Reliability scores and geographic distance are not evidence of delivery speed.
-      const verifiedDeliveryHours = input.overrideDeliveryHours?.[s.id];
+      const deliveryEvidence = s.verificationEvidence[0];
+      const verifiedDeliveryHours = deliveryEvidence?.verifiedDeliveryHours ?? undefined;
       const estimatedDeliveryHours = verifiedDeliveryHours ?? Number.POSITIVE_INFINITY;
 
       if (verifiedDeliveryHours === undefined) {
         reasons.push('DELIVERY_CAPABILITY_UNVERIFIED');
       } else if (verifiedDeliveryHours > maxSlaHours) {
-        reasons.push(`SLA_VIOLATION (Supplier commitment ${verifiedDeliveryHours}h exceeds ${maxSlaHours}h limit)`);
+        reasons.push(`SLA_VIOLATION (Verified supplier commitment ${verifiedDeliveryHours}h exceeds ${maxSlaHours}h limit)`);
       }
 
       // 5. MOQ Check
