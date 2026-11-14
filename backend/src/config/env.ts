@@ -5,6 +5,8 @@ dotenv.config();
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  // demo permits simulated providers; pilot must pass the live-integration readiness gate.
+  RELAY_RUNTIME_MODE: z.enum(['demo', 'pilot']).default('demo'),
   PORT: z.string().default('4000').transform((val) => parseInt(val, 10)),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   TEST_DATABASE_URL: z.string().optional(),
