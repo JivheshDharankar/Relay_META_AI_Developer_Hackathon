@@ -1,5 +1,10 @@
 import { app } from './app';
 import { env } from './config/env';
+import { assertPilotReadiness } from './config/pilotReadiness';
+
+if (env.RELAY_RUNTIME_MODE === 'pilot') {
+  assertPilotReadiness();
+}
 import { disconnectPrisma } from './config/prisma';
 import { relayOrchestrator } from './orchestration';
 import { StaleWorkflowSweeper } from './resilience/StaleWorkflowService';
