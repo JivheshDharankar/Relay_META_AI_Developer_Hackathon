@@ -38,6 +38,7 @@ enum SupplierEvidenceType {
   PRODUCT_CATALOG
   SUPPLIER_QUOTE
   MANUAL_REVIEW
+  DELIVERY_CAPABILITY
 }
 
 enum EvidenceVerificationStatus {
@@ -384,6 +385,7 @@ model SupplierDiscoveryLead {
   supplierId        String?  @unique
   supplier          Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
   evidence          SupplierVerificationEvidence[]
+  observations      SupplierDiscoveryObservation[]
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -393,7 +395,7 @@ model SupplierDiscoveryLead {
   @@map("supplier_discovery_leads")
 }
 
-/// Evidence is immutable source material with explicit verification state.
+/// Immutable source material with separately mutable review state.
 /// Store references/hashes, not secrets or unnecessary resident personal data.
 model SupplierVerificationEvidence {
   id             String                    @id @default(uuid())
@@ -404,6 +406,7 @@ model SupplierVerificationEvidence {
   source         String
   sourceReference String?
   contentHash    String?
+  verifiedDeliveryHours Int?
   notes          String?
   observedAt     DateTime                  @default(now())
   verifiedAt     DateTime?
@@ -418,6 +421,25 @@ model SupplierVerificationEvidence {
   @@index([discoveryLeadId, status])
   @@index([evidenceType, status])
   @@map("supplier_verification_evidence")
+}
+
+
+
+/// Append-only snapshot of each discovery observation; refreshes never erase history.
+model SupplierDiscoveryObservation {
+  id                 String   @id @default(uuid())
+  discoveryLeadId    String
+  source             String
+  sourceExternalId   String
+  observedAt         DateTime @default(now())
+  normalizedSnapshot Json
+  rawPayload         Json?
+  createdAt          DateTime @default(now())
+
+  discoveryLead SupplierDiscoveryLead @relation(fields: [discoveryLeadId], references: [id], onDelete: Cascade)
+
+  @@index([discoveryLeadId, observedAt])
+  @@map("supplier_discovery_observations")
 }
 
 /// Represents a procurement product with controlled measurement units
