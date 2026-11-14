@@ -18,10 +18,10 @@ export interface SupplierFilterInput {
 export class SupplierService {
   /**
    * Deterministically filters suppliers against all operational hard constraints:
-   * 1. Status == ACTIVE
+   * 1. Status == ACTIVE and verificationStatus == VERIFIED
    * 2. Product carried in catalog and available
    * 3. Society within supplier's serviceRadiusKm
-   * 4. Fulfillment within 12-hour SLA
+   * 4. Explicitly verified fulfillment turnaround within 12-hour SLA
    * 5. Quantity >= MOQ
    */
   public async filterEligibleSuppliers(
@@ -51,9 +51,12 @@ export class SupplierService {
     for (const s of suppliers) {
       const reasons: string[] = [];
 
-      // 1. Status Check
+      // 1. Status and independent verification checks. Discovery alone is never approval.
       if (s.status !== SupplierStatus.ACTIVE) {
         reasons.push('SUPPLIER_INACTIVE');
+      }
+      if (s.verificationStatus !== 'VERIFIED') {
+        reasons.push('SUPPLIER_NOT_VERIFIED');
       }
 
       // 2. Product Compatibility & Availability Check
@@ -74,14 +77,15 @@ export class SupplierService {
         reasons.push(`SERVICE_AREA_EXCEEDED (Distance ${distanceKm}km > Radius ${serviceRadiusKm}km)`);
       }
 
-      // 4. Fulfillment Turnaround SLA Check (12-Hour SLA)
-      // Estimated hours based on supplier characteristics or explicit input
-      const estimatedDeliveryHours =
-        input.overrideDeliveryHours?.[s.id] ??
-        (Number(s.reliabilityScore) >= 0.95 ? 6 : Number(s.reliabilityScore) >= 0.9 ? 8 : 14);
+      // 4. Delivery SLA must come from an explicit, verified supplier commitment.
+      // Reliability scores and geographic distance are not evidence of delivery speed.
+      const verifiedDeliveryHours = input.overrideDeliveryHours?.[s.id];
+      const estimatedDeliveryHours = verifiedDeliveryHours ?? Number.POSITIVE_INFINITY;
 
-      if (estimatedDeliveryHours > maxSlaHours) {
-        reasons.push(`SLA_VIOLATION (Delivery ${estimatedDeliveryHours}h exceeds 12h SLA limit)`);
+      if (verifiedDeliveryHours === undefined) {
+        reasons.push('DELIVERY_CAPABILITY_UNVERIFIED');
+      } else if (verifiedDeliveryHours > maxSlaHours) {
+        reasons.push(`SLA_VIOLATION (Supplier commitment ${verifiedDeliveryHours}h exceeds ${maxSlaHours}h limit)`);
       }
 
       // 5. MOQ Check
