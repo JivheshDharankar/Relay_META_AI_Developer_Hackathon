@@ -21,6 +21,32 @@ enum SupplierStatus {
   INACTIVE
 }
 
+enum SupplierVerificationStatus {
+  UNVERIFIED
+  PENDING_REVIEW
+  VERIFIED
+  REJECTED
+  SUSPENDED
+}
+
+enum SupplierEvidenceType {
+  BUSINESS_REGISTRATION
+  TAX_REGISTRATION
+  CONTACT_OWNERSHIP
+  ADDRESS_VERIFICATION
+  BANK_ACCOUNT_OWNERSHIP
+  PRODUCT_CATALOG
+  SUPPLIER_QUOTE
+  MANUAL_REVIEW
+}
+
+enum EvidenceVerificationStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+  EXPIRED
+}
+
 enum ProductUnit {
   KG
   LITRE
@@ -313,16 +339,85 @@ model Supplier {
   serviceRadiusKm  Decimal        @default(10.0) @db.Decimal(6, 2)
   reliabilityScore Decimal        @default(1.0) @db.Decimal(3, 2) // Deterministic snapshot [0.00 - 1.00]
   status           SupplierStatus @default(ACTIVE)
+  verificationStatus SupplierVerificationStatus @default(UNVERIFIED)
+  verifiedAt       DateTime?
+  verificationNotes String?
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
 
   communityOrders CommunityOrder[]
   supplierOffers  SupplierOffer[]
   products        SupplierProduct[]
+  verificationEvidence SupplierVerificationEvidence[]
+  discoveryLead   SupplierDiscoveryLead?
 
   @@index([status])
+  @@index([verificationStatus])
   @@index([city])
   @@map("suppliers")
+}
+
+
+/// A discovered business is a lead, never an approved supplier by default.
+/// Discovery providers may populate this record; only a reviewed verification process
+/// may promote it to a Supplier record eligible for procurement.
+model SupplierDiscoveryLead {
+  id                String   @id @default(uuid())
+  source            String
+  sourceExternalId  String
+  name              String
+  formattedAddress  String
+  street            String?
+  city              String?
+  state             String?
+  postalCode        String?
+  country           String?
+  latitude          Decimal? @db.Decimal(9, 6)
+  longitude         Decimal? @db.Decimal(9, 6)
+  phone             String?
+  email             String?
+  website           String?
+  categories        Json?
+  firstDiscoveredAt DateTime @default(now())
+  lastDiscoveredAt  DateTime @default(now())
+  rawEvidence       Json?
+  supplierId        String?  @unique
+  supplier          Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  evidence          SupplierVerificationEvidence[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([source, sourceExternalId])
+  @@index([city, state])
+  @@index([lastDiscoveredAt])
+  @@map("supplier_discovery_leads")
+}
+
+/// Evidence is immutable source material with explicit verification state.
+/// Store references/hashes, not secrets or unnecessary resident personal data.
+model SupplierVerificationEvidence {
+  id             String                    @id @default(uuid())
+  supplierId     String?
+  discoveryLeadId String?
+  evidenceType   SupplierEvidenceType
+  status         EvidenceVerificationStatus @default(PENDING)
+  source         String
+  sourceReference String?
+  contentHash    String?
+  notes          String?
+  observedAt     DateTime                  @default(now())
+  verifiedAt     DateTime?
+  expiresAt      DateTime?
+  createdAt      DateTime                  @default(now())
+  updatedAt      DateTime                  @updatedAt
+
+  supplier       Supplier?              @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  discoveryLead  SupplierDiscoveryLead? @relation(fields: [discoveryLeadId], references: [id], onDelete: Cascade)
+
+  @@index([supplierId, status])
+  @@index([discoveryLeadId, status])
+  @@index([evidenceType, status])
+  @@map("supplier_verification_evidence")
 }
 
 /// Represents a procurement product with controlled measurement units
