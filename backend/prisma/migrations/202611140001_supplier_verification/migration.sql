@@ -70,3 +70,55 @@ ALTER TABLE "supplier_verification_evidence"
 ALTER TABLE "supplier_verification_evidence"
   ADD CONSTRAINT "supplier_verification_evidence_discoveryLeadId_fkey"
   FOREIGN KEY ("discoveryLeadId") REFERENCES "supplier_discovery_leads"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+
+-- A verified delivery capability is evidence, not a request-time override.
+ALTER TYPE "SupplierEvidenceType" ADD VALUE IF NOT EXISTS 'DELIVERY_CAPABILITY';
+ALTER TABLE "supplier_verification_evidence"
+  ADD COLUMN "verifiedDeliveryHours" INTEGER;
+
+-- Each evidence item must belong to exactly one supplier or discovery lead.
+ALTER TABLE "supplier_verification_evidence"
+  ADD CONSTRAINT "supplier_verification_evidence_exactly_one_owner_check"
+  CHECK (("supplierId" IS NOT NULL)::integer + ("discoveryLeadId" IS NOT NULL)::integer = 1);
+
+-- Keep source provenance immutable while allowing review status/notes to evolve.
+CREATE OR REPLACE FUNCTION relay_guard_supplier_evidence_provenance()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW."supplierId" IS DISTINCT FROM OLD."supplierId"
+    OR NEW."discoveryLeadId" IS DISTINCT FROM OLD."discoveryLeadId"
+    OR NEW."evidenceType" IS DISTINCT FROM OLD."evidenceType"
+    OR NEW."source" IS DISTINCT FROM OLD."source"
+    OR NEW."sourceReference" IS DISTINCT FROM OLD."sourceReference"
+    OR NEW."contentHash" IS DISTINCT FROM OLD."contentHash"
+    OR NEW."observedAt" IS DISTINCT FROM OLD."observedAt"
+    OR NEW."createdAt" IS DISTINCT FROM OLD."createdAt"
+  THEN
+    RAISE EXCEPTION 'Supplier evidence provenance fields are immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "supplier_verification_evidence_provenance_immutable"
+BEFORE UPDATE ON "supplier_verification_evidence"
+FOR EACH ROW EXECUTE FUNCTION relay_guard_supplier_evidence_provenance();
+
+CREATE TABLE "supplier_discovery_observations" (
+  "id" TEXT NOT NULL,
+  "discoveryLeadId" TEXT NOT NULL,
+  "source" TEXT NOT NULL,
+  "sourceExternalId" TEXT NOT NULL,
+  "observedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "normalizedSnapshot" JSONB NOT NULL,
+  "rawPayload" JSONB,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "supplier_discovery_observations_pkey" PRIMARY KEY ("id")
+);
+CREATE INDEX "supplier_discovery_observations_discoveryLeadId_observedAt_idx"
+  ON "supplier_discovery_observations"("discoveryLeadId", "observedAt");
+ALTER TABLE "supplier_discovery_observations"
+  ADD CONSTRAINT "supplier_discovery_observations_discoveryLeadId_fkey"
+  FOREIGN KEY ("discoveryLeadId") REFERENCES "supplier_discovery_leads"("id")
+  ON DELETE CASCADE ON UPDATE CASCADE;
