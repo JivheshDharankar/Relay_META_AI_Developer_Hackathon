@@ -4,6 +4,7 @@ import { mockSupplierDiscoveryProvider } from './MockSupplierDiscoveryProvider';
 import { SupplierDiscoveryProvider } from './SupplierDiscoveryProvider';
 
 export * from './types';
+export * from './SupplierDiscoveryLeadService';
 export * from './SupplierDiscoveryProvider';
 export * from './GeoapifySupplierProvider';
 export * from './MockSupplierDiscoveryProvider';
